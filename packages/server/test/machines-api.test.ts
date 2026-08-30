@@ -300,7 +300,7 @@ describe("machines API", () => {
           output: "",
           identity: { ...IDENTITY, platform: "win32" as const },
         }),
-        probe: async (_target, _run, platform) => {
+        probe: async (_target, _layout, _run, platform) => {
           dialects.push(platform ?? null);
           return { state: { kind: "stopped" as const }, machineId: null };
         },
