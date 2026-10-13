@@ -4130,7 +4130,7 @@ export interface TraceImportResponse {
 // Usage and cost statistics
 // ---------------------------------------------------------------------------
 
-export type UsageGroupBy = "date" | "agent" | "model" | "session";
+export type UsageGroupBy = "date" | "agent" | "model" | "session" | "squad";
 
 /**
  * A cost split by the three pricing buckets, in USD: cached input (`cacheRead`), uncached input
