@@ -3,7 +3,7 @@
 - **Date:** 2026-10-13
 - **Type:** feat
 - **Scope:** `web`、`ui`
-- **PR:** TBD
+- **PR:** [#1078](https://github.com/Prism-Shadow/penguin-harness/pull/1078)
 
 [English](2026-10-13-squad-row-mark.md)
 
