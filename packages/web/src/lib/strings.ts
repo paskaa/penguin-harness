@@ -16,7 +16,7 @@ import type { ModelGroupSort } from "../features/models/model-sort";
 import type { StartPageSiteId } from "../features/builtin-browser/new-tab-page";
 
 export const zh = {
-  appName: "PenguinHarness",
+  appName: "经创贺联",
 
   nav: {
     chat: "对话",
