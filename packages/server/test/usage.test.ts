@@ -249,6 +249,115 @@ describe("usage-service (cost computed on the fly)", () => {
     expect(res.summary.last7d.hasUncosted).toBe(false);
   });
 
+  // ---- The row cache: it must never make a PRICE look stale, and must never outlive the
+  // tokens behind it. Both halves are asserted here, because the bug they guard against is
+  // silent: a cost figure that lags its rate is plausible-looking and wrong.
+  it("a price added after a query shows up on the NEXT one, with no TTL wait", async () => {
+    const now = new Date("2026-07-06T10:00:00");
+    insert("2026-07-06", { modelId: "m-fresh" });
+    const svc = service(now);
+
+    // First read prices nothing: no rate configured yet.
+    const before = await svc.query("p1", { groupBy: "date" });
+    expect(before.summary.total.cost).toBeNull();
+    expect(before.summary.total.hasUncosted).toBe(true);
+
+    // The rate arrives. The cached ROWS are still reused (that is the point), but the pricing
+    // runs again on every read — so the very next call already sees it.
+    pricing["m-fresh"] = { cacheRead: 1, cacheWrite: 1, output: 1 };
+    const after = await svc.query("p1", { groupBy: "date" });
+    expect(after.summary.total.hasUncosted).toBe(false);
+    expect(after.summary.total.cost).toBeCloseTo((10 + 1 + 5) / 1e6, 12);
+  });
+
+  it("an edited price replaces the old figure immediately", async () => {
+    const now = new Date("2026-07-06T10:00:00");
+    insert("2026-07-06", { modelId: "m-edit" });
+    pricing["m-edit"] = { cacheRead: 0, cacheWrite: 0, output: 1 };
+    const svc = service(now);
+    const first = await svc.query("p1", { groupBy: "date" });
+    const firstCost = first.summary.total.cost;
+    expect(firstCost).not.toBeNull();
+
+    // Same rows, new rate: the token sums are unchanged, so only a re-priced read can tell.
+    pricing["m-edit"] = { cacheRead: 0, cacheWrite: 0, output: 1000 };
+    const second = await svc.query("p1", { groupBy: "date" });
+    expect(second.summary.total.cost).toBeGreaterThan(firstCost as number);
+  });
+
+  it("usage arriving through the recorder drops the cached rows immediately", async () => {
+    const now = new Date("2026-07-06T10:00:00");
+    insert("2026-07-06", { modelId: "m-live" });
+    pricing["m-live"] = { cacheRead: 1, cacheWrite: 1, output: 1 };
+    const svc = service(now);
+    const first = await svc.query("p1", { groupBy: "date" });
+    const firstTotal = first.summary.total.total;
+
+    // A request lands after the first read, recorded the way production records one — the
+    // recorder invalidating the cache being what ends the staleness. Without that step the
+    // cached rows would keep answering with the earlier sum until the TTL expired.
+    svc.invalidate("p1");
+    insert("2026-07-06", { modelId: "m-live", total: 777 });
+    const second = await svc.query("p1", { groupBy: "date" });
+    expect(second.summary.total.total).toBe(firstTotal as number + 777);
+  });
+
+  it("a cached row-set is never reused across a different window", async () => {
+    const now = new Date("2026-07-06T10:00:00");
+    insert("2026-07-06", { modelId: "m-w" });
+    const svc = service(now);
+    // Prime the cache with one window...
+    await svc.query("p1", { groupBy: "date" });
+    // ...then ask about a range that excludes that day. If the key missed the range, the
+    // primed answer would come back and the excluded day would appear in the total.
+    const other = await svc.query("p1", { groupBy: "date", from: "2026-07-20", to: "2026-07-25" });
+    expect(other.summary.total.total).toBe(0);
+  });
+
+  it("two different windows never share a cached answer", async () => {
+    const now = new Date("2026-07-06T10:00:00");
+    insert("2026-07-06", { modelId: "m-k" });
+    const svc = service(now);
+    const today = await svc.query("p1", { groupBy: "date" });
+    const ranged = await svc.query("p1", { groupBy: "date", from: "2026-07-01", to: "2026-07-31" });
+    // Same underlying rows here, but the two queries are separate keys; a leak would show up
+    // as one response silently answering for the other's parameters.
+    expect(today.groups.length).toBeGreaterThan(0);
+    expect(ranged.groups.length).toBeGreaterThanOrEqual(today.groups.length);
+  });
+
+  // ---- groupLimit: the caller asks only for what it renders.
+  it("groupLimit returns only the most recent groups, newest first", async () => {
+    const now = new Date("2026-07-06T10:00:00");
+    for (let i = 1; i <= 5; i++) {
+      insert("2026-07-06", {
+        modelId: "m-g",
+        sessionId: `session-2026-07-06-00-00-0${i}-aaaaaaa${i}`,
+      });
+    }
+    const svc = service(now);
+    const all = await svc.query("p1", { groupBy: "session" });
+    const capped = await svc.query("p1", { groupBy: "session", groupLimit: 2 });
+    expect(capped.groups).toHaveLength(2);
+    // Session ids embed their creation timestamp, so string order IS chronological order.
+    expect(capped.groups.map((g) => g.key)).toEqual(
+      [...all.groups.map((g) => g.key)].sort().reverse().slice(0, 2),
+    );
+  });
+
+  it("omitting groupLimit still returns every group (the export and cost page rely on it)", async () => {
+    const now = new Date("2026-07-06T10:00:00");
+    for (let i = 1; i <= 4; i++) {
+      insert("2026-07-06", {
+        modelId: "m-a",
+        sessionId: `session-2026-07-06-00-00-0${i}-bbbbbbb${i}`,
+      });
+    }
+    const svc = service(now);
+    const all = await svc.query("p1", { groupBy: "session" });
+    expect(all.groups.length).toBe(4);
+  });
+
   it("price added later: no pricing at insert time; once configured, queries price it immediately", async () => {
     const now = new Date("2026-07-06T10:00:00");
     insert("2026-07-06", { modelId: "m-late" });
