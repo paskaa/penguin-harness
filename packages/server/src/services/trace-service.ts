@@ -660,11 +660,10 @@ private async resolveChildAgent(
       }
     }
     if (!found) return false;
-    // One head-read gives the index this Session's facts (origin, workspace, title, model ref)
-    // that every later read of it needs. `classifySession` is not on the TraceIndex interface,
-    // so drive it through the reconciler -- which is mtime-gated, so this is cheap for the
-    // Sessions it already knows and does the head-read only for the one we just registered.
-    await this.index.reconcileAgent(projectId, agentId, { force: true });
+    // No trailing reconcile here: the probe registers ONLY this Session's shards, and a
+    // force pass would sweep in other Sessions' shards as a side effect (see the
+    // "slips past the gate" trace-index test). This Session's facts (origin, workspace,
+    // title) arrive on the next scheduled/forced reconcile like any other late write.
     return true;
   }
 
