@@ -357,59 +357,6 @@ export class TraceService implements Traces {
    * cost one extra scan, never a false 404. Note this retry only covers a WHOLE-session
    * miss: a session with some shards indexed and a later one missed is served as-is.
    */
-  /**
-   * Register ONE Session's shards by listing the Agent's date directories.
-   *
-   * Answers "does this Session have Trace files, and how big are they" without walking the
-   * tree: a shard is named `<sessionId>_NNN.jsonl` inside a `yyyy-mm-dd` directory, so one
-   * listing per date directory is the whole search. Returns whether anything was found —
-   * false leaves the caller's full reconcile as the fallback, so a probe that cannot see a
-   * file (a date directory it failed to read, say) costs a walk, never a wrong answer.
-   */
-  private async probeSessionShards(
-    projectId: string,
-    agentId: string,
-    sessionId: string,
-  ): Promise<boolean> {
-    const dir = tracesDir(this.root, projectId, agentId);
-    let dates: string[];
-    try {
-      const entries = await fs.readdir(dir, { withFileTypes: true });
-      dates = entries.filter((e) => e.isDirectory()).map((e) => e.name);
-    } catch {
-      return false; // no traces directory at all: nothing to find, and the walk agrees
-    }
-    let found = false;
-    for (const date of dates) {
-      let names: string[];
-      try {
-        names = await fs.readdir(path.join(dir, date));
-      } catch {
-        continue;
-      }
-      for (const name of names) {
-        const m = TRACE_FILE_RE.exec(name);
-        if (m === null || m[1] !== sessionId) continue;
-        let sizeBytes = 0;
-        try {
-          sizeBytes = (await fs.stat(path.join(dir, date, name))).size;
-        } catch {
-          continue; // vanished between the listing and the stat: the walk would not see it either
-        }
-        this.store.upsertFile({
-          projectId,
-          agentId,
-          sessionId,
-          fileIndex: Number.parseInt(m[2]!, 10),
-          date,
-          sizeBytes,
-        });
-        found = true;
-      }
-    }
-    return found;
-  }
-
   private async locateAll(
     projectId: string,
     agentId: string,
