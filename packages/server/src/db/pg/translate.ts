@@ -262,6 +262,95 @@ function translateDateExprs(sql: string): string {
  * MAX/MIN are aggregates only. Exactly-2-argument calls map to GREATEST/LEAST
  * (single-arg aggregates untouched). Nested parens/strings handled.
  */
+/**
+ * Qualify bare references to SET-target columns inside ON CONFLICT DO UPDATE SET
+ * expressions with the target table name (PG rejects the unqualified form).
+ */
+function qualifyDoUpdateSetRefs(sql: string): string {
+  const setMatch = sql.match(/\bDO\s+UPDATE\s+SET\b/i);
+  if (!setMatch || setMatch.index === undefined) return sql;
+  const tblMatch = sql.match(/\bINSERT\s+INTO\s+([A-Za-z_][A-Za-z0-9_]*)/i);
+  if (!tblMatch) return sql;
+  const table = tblMatch[1];
+  const setStart = setMatch.index + setMatch[0].length;
+  const setBody = sql.slice(setStart);
+  // split assignments at top-level commas (string/paren aware)
+  const parts: string[] = [];
+  let depth = 0;
+  let inStr = false;
+  let cur = "";
+  for (let i = 0; i < setBody.length; i += 1) {
+    const ch = setBody[i];
+    if (inStr) {
+      cur += ch;
+      if (ch === "'") {
+        if (setBody[i + 1] === "'") { cur += "'"; i += 1; continue; }
+        inStr = false;
+      }
+      continue;
+    }
+    if (ch === "'") { inStr = true; cur += ch; continue; }
+    if (ch === "(") depth += 1;
+    else if (ch === ")") depth -= 1;
+    if (ch === "," && depth === 0) { parts.push(cur); cur = ""; continue; }
+    cur += ch;
+  }
+  if (cur.trim()) parts.push(cur);
+  // SET target columns
+  const targets: string[] = [];
+  for (const p of parts) {
+    const eq = p.indexOf("=");
+    if (eq > 0) {
+      const lhs = p.slice(0, eq).trim();
+      const m = lhs.match(/^([A-Za-z_][A-Za-z0-9_]*)$/);
+      if (m) targets.push(m[1]);
+    }
+  }
+  if (targets.length === 0) return sql;
+  const qualified = parts.map((p) => {
+    const eq = p.indexOf("=");
+    if (eq <= 0) return p;
+    const lhs = p.slice(0, eq);
+    const rhs = p.slice(eq + 1);
+    let out = "";
+    let i = 0;
+    while (i < rhs.length) {
+      const ch = rhs[i];
+      if (ch === "'") {
+        let j = i + 1;
+        while (j < rhs.length) {
+          if (rhs[j] === "'") {
+            if (rhs[j + 1] === "'") { j += 2; continue; }
+            break;
+          }
+          j += 1;
+        }
+        out += rhs.slice(i, Math.min(j + 1, rhs.length));
+        i = j + 1;
+        continue;
+      }
+      if (/[A-Za-z_]/.test(ch)) {
+        let j = i;
+        while (j < rhs.length && /[A-Za-z0-9_]/.test(rhs[j])) j += 1;
+        const word = rhs.slice(i, j);
+        const before = i > 0 ? rhs[i - 1] : "";
+        const after = j < rhs.length ? rhs[j] : "";
+        if (targets.includes(word) && before !== "." && after !== "(") {
+          out += `${table}.${word}`;
+        } else {
+          out += word;
+        }
+        i = j;
+        continue;
+      }
+      out += ch;
+      i += 1;
+    }
+    return `${lhs}=${out}`;
+  });
+  return sql.slice(0, setStart) + qualified.join(",");
+}
+
 function translateScalarMaxMin(sql: string): string {
   // Matches MAX(…) / MIN(…) whose parenthetical has ≤1 nesting level, then keeps
   // only exactly-2-arg forms (aggregates are 1-arg and pass through untouched).
@@ -506,6 +595,11 @@ export function translateStatement(sql: string, ctx: TranslateCtx): string | nul
       }
     }
   }
+
+  // ON CONFLICT DO UPDATE: PG resolves an unqualified RHS reference that shares a
+  // name with its own SET target as AMBIGUOUS ("column reference x is ambiguous");
+  // SQLite resolves it to the existing row. Qualify such refs with the target table.
+  s = qualifyDoUpdateSetRefs(s);
 
   // Date-function rewrites (usage/errors repos)
   s = translateDateExprs(s);
