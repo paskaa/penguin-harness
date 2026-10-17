@@ -350,6 +350,15 @@ export class TraceService implements Traces {
   private lineIndex = new TraceLineIndex();
 
   /**
+   * Full-shard read cache: history shards are append-only JSONL, so (size, mtime)
+   * validates freshness for free. Serves repeat /messages reads of the same shard
+   * (the conversation pane re-reads on every focus) without re-parsing megabytes.
+   * LRU by re-insertion, capped at 40 shards. Callers get a SHALLOW copy: several
+   * splice/sort the array for their own shape.
+   */
+  private shardCache = new Map<string, { key: string; messages: OmniMessage[] }>();
+
+  /**
    * All of this Session's Trace files (sorted by index ascending), served from the
    * index. An empty answer force-reconciles once and retries before being believed:
    * disk is the source of truth, and a gate blind spot (a backdated write, or an
@@ -420,7 +429,22 @@ export class TraceService implements Traces {
       const read: TraceTailRead = await readTraceTailLines(path, tailFromEnd);
       return { messages: read.messages, firstOrdinal: read.skippedUnits };
     }
-    return { messages: await readTraceTolerant(path), firstOrdinal: 0 };
+    // Full-transcript read: (size, mtime)-validated cache (see shardCache).
+    const st = await fs.stat(path);
+    const freshKey = st.size + ":" + String(st.mtimeMs);
+    const hit = this.shardCache.get(path);
+    if (hit && hit.key === freshKey) {
+      this.shardCache.delete(path);
+      this.shardCache.set(path, hit);
+      return { messages: hit.messages.slice(), firstOrdinal: 0 };
+    }
+    const full = await readTraceTolerant(path);
+    if (this.shardCache.size >= 40) {
+      const oldest = this.shardCache.keys().next().value;
+      if (oldest !== undefined) this.shardCache.delete(oldest);
+    }
+    this.shardCache.set(path, { key: freshKey, messages: full });
+    return { messages: full.slice(), firstOrdinal: 0 };
   }
 
   /**
