@@ -91,6 +91,17 @@ function tsWindowQuery(c: Context<AppEnv>): { fromTs?: string; toTs?: string } {
 export function usageRoutes(deps: UsageRouteDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
 
+/**
+ * Short-TTL response cache for the main usage read: the dashboard re-requests the
+ * same aggregates several times a minute while every miss costs 4-6 grouped scans
+ * over a six-figure usage_records table (seconds through the synchronous DB bridge).
+ * 5s staleness is invisible on an analytics chart. Keyed by the FULL request shape
+ * (projectId + args + includeGlobalErrors, so admin-only rows never leak across
+ * viewers); bounded size.
+ */
+const usageCache = new Map<string, { at: number; body: unknown }>();
+const USAGE_TTL_MS = 5000;
+
   app.get("/", async (c) => {
     // Defensive id validation.
     const projectId = requireValidId(c, "projectId");
@@ -126,8 +137,7 @@ export function usageRoutes(deps: UsageRouteDeps): Hono<AppEnv> {
       }
       groupLimit = n;
     }
-    return c.json(
-      await deps.usageService.query(projectId, {
+    const usageArgs = {
         groupBy: groupByRaw as UsageGroupBy,
         granularity,
         ...window,
@@ -143,8 +153,14 @@ export function usageRoutes(deps: UsageRouteDeps): Hono<AppEnv> {
         ...(provider !== undefined && provider !== "" ? { provider } : {}),
         ...(modelId !== undefined && modelId !== "" ? { modelId } : {}),
         ...(groupLimit !== undefined ? { groupLimit } : {}),
-      }),
-    );
+    };
+    const cacheKey = projectId + "::" + JSON.stringify(usageArgs);
+    const hit = usageCache.get(cacheKey);
+    if (hit && Date.now() - hit.at < USAGE_TTL_MS) return c.json(hit.body);
+    const body = await deps.usageService.query(projectId, usageArgs);
+    if (usageCache.size > 200) usageCache.clear();
+    usageCache.set(cacheKey, { at: Date.now(), body });
+    return c.json(body);
   });
 
   // Lifetime Token total per Model, for the models page's per-card figure. Takes no filters at
