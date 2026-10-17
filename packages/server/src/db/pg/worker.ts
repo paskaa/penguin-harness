@@ -72,9 +72,15 @@ async function getClient(): Promise<pg.Client> {
         connecting = null;
       });
       if (cfg.schema) {
-        const schema = JSON.stringify(cfg.schema).slice(1, -1);
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(cfg.schema)) {
+          throw new Error(`pg-shim: invalid schema name '${cfg.schema}'`);
+        }
+        const schema = cfg.schema;
+        // Fresh-deployment bootstrap: sqlite created its file on open; PG must
+        // create the schema itself or SET search_path below fails.
         return c
-          .query(`SET search_path TO ${schema}`)
+          .query(`CREATE SCHEMA IF NOT EXISTS ${schema}`)
+          .then(() => c.query(`SET search_path TO ${schema}`))
           .then(() =>
             // The shim's PRAGMA user_version emulation lives here (migrations stamp it).
             c.query(
@@ -199,7 +205,8 @@ async function handleOnce(req: Req): Promise<Result> {
   const params = req.params ? req.params.map(sanitize) : null;
   const finalParams = convertFtsParams(req.sql, params);
   if (req.want === "exec") {
-    await c.query(req.sql);
+    // exec CAN carry params (e.g. the PRAGMA user_version → _pg_meta upsert).
+    await c.query(req.sql, finalParams || []);
     return { ok: true };
   }
   const res = await c.query(req.sql, finalParams || []);

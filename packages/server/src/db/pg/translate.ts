@@ -11,9 +11,6 @@
  *  - `?` positional params            → `$1..$n` (literal/identifier/comment aware)
  *  - `:name` named params             → `$n` (order of first appearance)
  *  - INSERT OR REPLACE / OR IGNORE    → ON CONFLICT (pk) DO UPDATE / DO NOTHING
- *  - scalar max(a, b, …) (2+ args)    → GREATEST(a, b, …)
- *  - DO UPDATE SET bare RHS columns   → table-qualified (PG: unqualified = ambiguous
- *                                       with EXCLUDED; sqlite requires bare)
  *  - PRAGMA journal/foreign_keys/
  *    busy_timeout/synchronous         → no-op
  *  - PRAGMA user_version (get/set)    → _pg_meta table (handled by caller hooks)
@@ -166,17 +163,7 @@ export function convertPlaceholders(sql: string): { sql: string; named: string[]
       let j = i + 1;
       while (j < n && /[A-Za-z0-9_]/.test(sql[j])) j += 1;
       const name = sql.slice(i + 1, j);
-      const seen = named.indexOf(name);
-      if (seen !== -1) {
-        // SQLite named params refer to ONE binding wherever they reappear; reuse
-        // the same $n so the statement needs exactly namedOrder.length values
-        // (buildParams supplies one value per distinct name — a fresh $n per
-        // repeat left the tail positions unbound: "supplies 13, requires 19").
-        out += `$${seen + 1}`;
-        i = j;
-        continue;
-      }
-      named.push(name);
+      if (!named.includes(name)) named.push(name);
       idx += 1;
       out += `$${idx}`;
       i = j;
@@ -261,6 +248,35 @@ function translateDateExprs(sql: string): string {
  *    that pass it through keep working
  *  - LIKE → ILIKE (SQLite's LIKE is ASCII-case-insensitive; PG's is not)
  */
+/**
+ * SQLite's scalar 2-arg MAX(a,b)/MIN(a,b) are null-safe value comparisons; PG's
+ * MAX/MIN are aggregates only. Exactly-2-argument calls map to GREATEST/LEAST
+ * (single-arg aggregates untouched). Nested parens/strings handled.
+ */
+function translateScalarMaxMin(sql: string): string {
+  // Matches MAX(…) / MIN(…) whose parenthetical has ≤1 nesting level, then keeps
+  // only exactly-2-arg forms (aggregates are 1-arg and pass through untouched).
+  return sql.replace(/\b(MAX|MIN)\s*\(([^()]*(?:\([^()]*\)[^()]*)*)\)/gi, (m0, fn: string, args: string) => {
+    let depth = 0;
+    let commas = 0;
+    let inStr = false;
+    for (let i = 0; i < args.length; i += 1) {
+      const ch = args[i];
+      if (inStr) {
+        if (ch === "'") {
+          if (args[i + 1] === "'") { i += 1; continue; }
+          inStr = false;
+        }
+      } else if (ch === "'") inStr = true;
+      else if (ch === "(") depth += 1;
+      else if (ch === ")") depth -= 1;
+      else if (ch === "," && depth === 0) commas += 1;
+    }
+    if (commas !== 1) return m0;
+    return `${fn.toUpperCase() === "MAX" ? "GREATEST" : "LEAST"}(${args})`;
+  });
+}
+
 function translateFts(sql: string): string {
   let s = sql;
 
@@ -297,6 +313,15 @@ function translateFts(sql: string): string {
 
   // LIKE → ILIKE (ASCII case-insensitivity parity)
   s = s.replace(/\bLIKE\b/g, "ILIKE");
+
+  // SQLite scalar 2-arg MAX(a,b)/MIN(a,b) → GREATEST/LEAST (PG aggregates are 1-arg)
+  s = translateScalarMaxMin(s);
+
+  // SQLite's IS / IS NOT do null-safe VALUE comparison; PostgreSQL only allows them
+  // against NULL/TRUE/FALSE. Value forms map 1:1 to IS [NOT] DISTINCT FROM (same NULL
+  // semantics). `IS NOT NULL` and `IS NULL` must pass through untouched.
+  s = s.replace(/\bIS\s+NOT\s+(?!NULL\b)(?!DISTINCT\b)(?=(?:'[^']*'|\?|\$\d+|[A-Za-z_][\w.]*))/gi, "IS DISTINCT FROM ");
+  s = s.replace(/\bIS\s+(?!NOT\b)(?!NULL\b)(?!DISTINCT\b)(?!TRUE\b)(?!FALSE\b)(?!UNKNOWN\b)(?=(?:'[^']*'|\?|\$\d+|[A-Za-z_][\w.]*))/gi, "IS NOT DISTINCT FROM ");
 
   return s;
 }
@@ -415,208 +440,6 @@ function splitTopLevel(s: string): string[] {
   return out;
 }
 
-/**
- * SQLite's scalar `max(a, b, …)` (2+ arguments) has no PostgreSQL counterpart —
- * PG's max() is aggregate-only. Rewrite it to GREATEST, which is variadic.
- * A single-argument MAX is the aggregate and passes through untouched.
- *
- * NULL semantics differ subtly (sqlite scalar max returns NULL when any argument
- * is NULL; GREATEST ignores NULLs). Every call site in the repos feeds
- * COALESCE'd non-null arguments plus a bound parameter, so behaviour is
- * identical in practice; the monotonic-stamp upserts in sessions.ts are the
- * only users.
- */
-function translateScalarMax(sql: string): string {
-  let out = "";
-  let i = 0;
-  const n = sql.length;
-  while (i < n) {
-    const ch = sql[i];
-    if (ch === "'" || ch === '"') {
-      const q = ch;
-      let j = i + 1;
-      while (j < n) {
-        if (sql[j] === q) {
-          if (sql[j + 1] === q) {
-            j += 2;
-            continue;
-          }
-          break;
-        }
-        j += 1;
-      }
-      out += sql.slice(i, Math.min(j + 1, n));
-      i = j + 1;
-      continue;
-    }
-    if (ch === "-" && sql[i + 1] === "-") {
-      const end = sql.indexOf("\n", i);
-      const stop = end === -1 ? n : end;
-      out += sql.slice(i, stop);
-      i = stop;
-      continue;
-    }
-    if (ch === "/" && sql[i + 1] === "*") {
-      const end = sql.indexOf("*/", i + 2);
-      const stop = end === -1 ? n : end + 2;
-      out += sql.slice(i, stop);
-      i = stop;
-      continue;
-    }
-    if (/[A-Za-z_]/.test(ch)) {
-      let j = i;
-      while (j < n && /[A-Za-z0-9_]/.test(sql[j])) j += 1;
-      const word = sql.slice(i, j);
-      if (/^max$/i.test(word) && sql[j] === "(") {
-        // Balanced close paren, quote aware.
-        let depth = 0;
-        let k = j;
-        for (; k < n; k += 1) {
-          const c = sql[k];
-          if (c === "'" || c === '"') {
-            const q = c;
-            k += 1;
-            while (k < n) {
-              if (sql[k] === q) {
-                if (sql[k + 1] === q) {
-                  k += 2;
-                  continue;
-                }
-                break;
-              }
-              k += 1;
-            }
-            continue;
-          }
-          if (c === "(") depth += 1;
-          else if (c === ")") {
-            depth -= 1;
-            if (depth === 0) break;
-          }
-        }
-        if (k < n) {
-          const inner = sql.slice(j + 1, k);
-          const args = splitTopLevel(inner);
-          if (args.length >= 2) {
-            out += `GREATEST(${inner})`;
-            i = k + 1;
-            continue;
-          }
-        }
-      }
-      out += word;
-      i = j;
-      continue;
-    }
-    out += ch;
-    i += 1;
-  }
-  return out;
-}
-
-/**
- * ON CONFLICT DO UPDATE SET dialect gap: SQLite refers to the target row's columns
- * UNQUALIFIED on the right-hand side, while PostgreSQL treats an unqualified
- * reference as ambiguous with the EXCLUDED pseudo-relation and requires table
- * qualification (`col = tbl.col + EXCLUDED.col`). Qualify bare RHS identifiers
- * that name a column of the INSERT's target table. Assignment LHS positions,
- * `excluded.`/`alias.`-prefixed references and function calls are left untouched.
- */
-function qualifyUpsertSetColumns(sql: string): string {
-  const m = sql.match(/\bDO\s+UPDATE\s+SET\b/i);
-  if (!m || m.index === undefined) return sql;
-  const parsed = parseInsert(sql);
-  if (!parsed) return sql;
-  const cols = new Set(parsed.columns.map((c) => c.toLowerCase()));
-  const setStart = m.index + m[0].length;
-  const region = sql.slice(setStart);
-  let out = "";
-  let i = 0;
-  const n = region.length;
-  let atAssignStart = true; // right after SET / after a top-level comma = LHS position
-  let prevSig = "";
-  while (i < n) {
-    const ch = region[i];
-    const next = region[i + 1];
-    if (ch === "-" && next === "-") {
-      const end = region.indexOf("\n", i);
-      const stop = end === -1 ? n : end;
-      out += region.slice(i, stop);
-      i = stop;
-      continue;
-    }
-    if (ch === "/" && next === "*") {
-      const end = region.indexOf("*/", i + 2);
-      const stop = end === -1 ? n : end + 2;
-      out += region.slice(i, stop);
-      i = stop;
-      continue;
-    }
-    if (ch === "'" || ch === '"') {
-      const q = ch;
-      let j = i + 1;
-      while (j < n) {
-        if (region[j] === q) {
-          if (region[j + 1] === q) {
-            j += 2;
-            continue;
-          }
-          break;
-        }
-        j += 1;
-      }
-      out += region.slice(i, Math.min(j + 1, n));
-      i = j + 1;
-      atAssignStart = false;
-      continue;
-    }
-    if (/[A-Za-z_]/.test(ch)) {
-      let j = i;
-      while (j < n && /[A-Za-z0-9_]/.test(region[j])) j += 1;
-      const word = region.slice(i, j);
-      const nextSig = region.slice(j).match(/^\s*(.)/)?.[1] ?? "";
-      const followedByParen = nextSig === "(";
-      const followsDot = prevSig === ".";
-      // Never touch identifier positions that begin a placeholder (`:name`, `?N`, `$n`)
-      // — qualifying `:output` would break the parameter it belongs to.
-      const startsPlaceholder = prevSig === ":" || prevSig === "?" || prevSig === "$";
-      if (!atAssignStart && !followsDot && !followedByParen && !startsPlaceholder && cols.has(word.toLowerCase())) {
-        out += `${parsed.table}.${word}`;
-      } else {
-        out += word;
-      }
-      atAssignStart = false;
-      prevSig = "w";
-      i = j;
-      continue;
-    }
-    if (ch === "(" || ch === ")") {
-      out += ch;
-      atAssignStart = false;
-      prevSig = ch;
-      i += 1;
-      continue;
-    }
-    if (ch === ",") {
-      out += ch;
-      atAssignStart = true;
-      prevSig = ",";
-      i += 1;
-      continue;
-    }
-    out += ch;
-    if (ch === "=") {
-      atAssignStart = false;
-      prevSig = "=";
-    } else if (ch !== " " && ch !== "\n" && ch !== "\t" && ch !== "\r") {
-      atAssignStart = false;
-      prevSig = ch;
-    }
-    i += 1;
-  }
-  return sql.slice(0, setStart) + out;
-}
-
 export interface TranslateCtx {
   /** Primary-key columns for a table, from the PG catalog (async, cached by caller). */
   pkOf(table: string): string[] | null;
@@ -674,14 +497,6 @@ export function translateStatement(sql: string, ctx: TranslateCtx): string | nul
       }
     }
   }
-
-  // SQLite scalar max(a, b, …) → GREATEST (PG has no multi-argument max()).
-  s = translateScalarMax(s);
-
-  // ON CONFLICT DO UPDATE SET: qualify bare target-table columns on the RHS
-  // (PG treats unqualified references as ambiguous with EXCLUDED; sqlite
-  // requires them bare). See function doc.
-  s = qualifyUpsertSetColumns(s);
 
   // Date-function rewrites (usage/errors repos)
   s = translateDateExprs(s);
