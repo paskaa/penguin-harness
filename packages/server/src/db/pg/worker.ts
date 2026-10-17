@@ -181,6 +181,21 @@ function convertFtsParams(sql: string, params: unknown[] | null): unknown[] | nu
 const TRANSIENT_PG =
   /not yet accepting connections|the database system is starting up|ECONNREFUSED|connection refused/i;
 
+// Hot-lookup cache: the app hammers server_settings (2.2M calls/7h) and
+// messaging_bindings (1.1M) through the synchronous bridge; each round trip costs
+// an Atomics.wait on the MAIN thread and they all serialize on one worker. A short
+// TTL turns the flood into ~2 queries/s with sub-second staleness.
+const HOT_READ = /\bFROM\s+(?:penguin\.)?(server_settings|messaging_bindings)\b/i;
+const HOT_WRITE = /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+(?:penguin\.)?(server_settings|messaging_bindings)\b/i;
+const CACHE_TTL_MS = 500;
+const CACHE_MAX = 2000;
+const hotCache = new Map<string, { at: number; rows: Record<string, unknown>[] }>();
+
+function hotCacheKey(req: Req): string {
+  const params = req.params ? JSON.stringify(req.params) : "";
+  return req.sql + "::" + params;
+}
+
 async function handle(req: Req): Promise<Result> {
   // The platform and PG may boot together; openDatabase's first statements can race
   // PG's readiness. Retry transient failures for up to 60s (bounded well inside the
@@ -201,6 +216,26 @@ async function handle(req: Req): Promise<Result> {
 }
 
 async function handleOnce(req: Req): Promise<Result> {
+  // serve hot read shapes from the TTL cache
+  if (req.want === "rows" && HOT_READ.test(req.sql)) {
+    const key = hotCacheKey(req);
+    const hit = hotCache.get(key);
+    if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
+      return { rows: hit.rows };
+    }
+    const res = await handleQuery(req);
+    if (res.rows) {
+      if (hotCache.size > CACHE_MAX) hotCache.clear();
+      hotCache.set(key, { at: Date.now(), rows: res.rows });
+    }
+    return res;
+  }
+  // any write to the hot tables invalidates the cache
+  if (HOT_WRITE.test(req.sql)) hotCache.clear();
+  return handleQuery(req);
+}
+
+async function handleQuery(req: Req): Promise<Result> {
   const c = await getClient();
   const params = req.params ? req.params.map(sanitize) : null;
   const finalParams = convertFtsParams(req.sql, params);
