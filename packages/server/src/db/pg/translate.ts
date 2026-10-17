@@ -269,9 +269,10 @@ function translateDateExprs(sql: string): string {
 function qualifyDoUpdateSetRefs(sql: string): string {
   const setMatch = sql.match(/\bDO\s+UPDATE\s+SET\b/i);
   if (!setMatch || setMatch.index === undefined) return sql;
-  const tblMatch = sql.match(/\bINSERT\s+INTO\s+([A-Za-z_][A-Za-z0-9_]*)/i);
+  const tblMatch = sql.match(/\bINSERT\s+INTO\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)/i);
   if (!tblMatch) return sql;
-  const table = tblMatch[1];
+  // schema-qualified targets: only the TABLE segment is a valid RHS qualifier
+  const table = tblMatch[1].split(".").pop() ?? tblMatch[1];
   const setStart = setMatch.index + setMatch[0].length;
   const setBody = sql.slice(setStart);
   // split assignments at top-level commas (string/paren aware)
