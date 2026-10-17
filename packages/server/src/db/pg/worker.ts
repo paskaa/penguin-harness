@@ -181,19 +181,107 @@ function convertFtsParams(sql: string, params: unknown[] | null): unknown[] | nu
 const TRANSIENT_PG =
   /not yet accepting connections|the database system is starting up|ECONNREFUSED|connection refused/i;
 
-// Hot-lookup cache: the app hammers server_settings (2.2M calls/7h) and
-// messaging_bindings (1.1M) through the synchronous bridge; each round trip costs
-// an Atomics.wait on the MAIN thread and they all serialize on one worker. A short
-// TTL turns the flood into ~2 queries/s with sub-second staleness.
-const HOT_READ = /\bFROM\s+(?:penguin\.)?(server_settings|messaging_bindings)\b/i;
-const HOT_WRITE = /\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+(?:penguin\.)?(server_settings|messaging_bindings)\b/i;
-const CACHE_TTL_MS = 500;
-const CACHE_MAX = 2000;
-const hotCache = new Map<string, { at: number; rows: Record<string, unknown>[] }>();
+// ============================================================
+// Universal read-through cache (the "PG memory layer").
+//
+// Every read pays the synchronous bridge: the main thread blocks in Atomics.wait,
+// one worker, one PG connection — so a handful of tiny lookups per request multiply
+// into seconds of serialized queueing. This layer serves repeating reads from a
+// table-aware LRU+TTL cache inside the worker:
+//
+//   read  (want="rows")  -> cache key = SQL + params; hit returns rows directly
+//   write (exec/run)     -> statements are parsed for table names; every cache
+//                           entry touching a written table is dropped IMMEDIATELY
+//                           (read-after-write stays correct within this process)
+//   TTL 300ms            -> bounds staleness from writers outside this process
+//                           (tracker, org scripts) to an imperceptible window
+//   LRU 3000 entries     -> bounded worker memory (~tens of MB worst case)
+//   volatile bypass      -> statements with random()/now()/current_* are never
+//                           cached
+// ============================================================
+const READ_CACHE_TTL = 300;
+const READ_CACHE_MAX = 3000;
+interface ReadCacheEntry {
+  at: number;
+  result: Result;
+  tables: Set<string>;
+}
+const readCache = new Map<string, ReadCacheEntry>();
+const readCacheIndex = new Map<string, Set<string>>();
 
-function hotCacheKey(req: Req): string {
-  const params = req.params ? JSON.stringify(req.params) : "";
-  return req.sql + "::" + params;
+const VOLATILE_SQL = /\b(random\s*\(|now\s*\(|clock_timestamp|current_timestamp|current_date|pg_sleep|pg_stat_)\b/i;
+const TABLE_RE = /\b(FROM|JOIN|INTO|UPDATE)\s+([A-Za-z_][A-Za-z0-9_.]*)/gi;
+
+function tablesOf(sql: string): Set<string> {
+  const tables = new Set<string>();
+  TABLE_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = TABLE_RE.exec(sql)) !== null) {
+    tables.add(m[2].split(".").pop()!.toLowerCase());
+  }
+  return tables;
+}
+
+function readCacheKey(req: Req): string {
+  return req.sql + "::" + (req.params ? JSON.stringify(req.params) : "");
+}
+
+function readCacheGet(key: string): ReadCacheEntry | null {
+  const hit = readCache.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.at >= READ_CACHE_TTL) {
+    // expired: drop now (also clears its table index) instead of hoarding
+    readCache.delete(key);
+    for (const t of hit.tables) {
+      const keys = readCacheIndex.get(t);
+      if (keys) {
+        keys.delete(key);
+        if (keys.size === 0) readCacheIndex.delete(t);
+      }
+    }
+    return null;
+  }
+  // LRU refresh
+  readCache.delete(key);
+  readCache.set(key, hit);
+  return hit;
+}
+
+function readCachePut(key: string, tables: Set<string>, result: Result): void {
+  if (readCache.size >= READ_CACHE_MAX) {
+    const oldest = readCache.keys().next().value;
+    if (oldest !== undefined) {
+      const old = readCache.get(oldest);
+      readCache.delete(oldest);
+      if (old) {
+        for (const t of old.tables) {
+          const keys = readCacheIndex.get(t);
+          if (keys) {
+            keys.delete(oldest);
+            if (keys.size === 0) readCacheIndex.delete(t);
+          }
+        }
+      }
+    }
+  }
+  readCache.set(key, { at: Date.now(), result, tables });
+  for (const t of tables) {
+    let keys = readCacheIndex.get(t);
+    if (!keys) {
+      keys = new Set<string>();
+      readCacheIndex.set(t, keys);
+    }
+    keys.add(key);
+  }
+}
+
+function readCacheInvalidate(tables: Set<string>): void {
+  for (const t of tables) {
+    const keys = readCacheIndex.get(t);
+    if (!keys) continue;
+    for (const key of keys) readCache.delete(key);
+    readCacheIndex.delete(t);
+  }
 }
 
 async function handle(req: Req): Promise<Result> {
@@ -216,22 +304,21 @@ async function handle(req: Req): Promise<Result> {
 }
 
 async function handleOnce(req: Req): Promise<Result> {
-  // serve hot read shapes from the TTL cache
-  if (req.want === "rows" && HOT_READ.test(req.sql)) {
-    const key = hotCacheKey(req);
-    const hit = hotCache.get(key);
-    if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
-      return { rows: hit.rows };
-    }
+  // read path: serve from the universal cache when possible
+  if (req.want === "rows" && !VOLATILE_SQL.test(req.sql)) {
+    const key = readCacheKey(req);
+    const hit = readCacheGet(key);
+    if (hit) return hit.result;
+    const tables = tablesOf(req.sql);
     const res = await handleQuery(req);
-    if (res.rows) {
-      if (hotCache.size > CACHE_MAX) hotCache.clear();
-      hotCache.set(key, { at: Date.now(), rows: res.rows });
-    }
+    if (res.rows && tables.size > 0) readCachePut(key, tables, res);
     return res;
   }
-  // any write to the hot tables invalidates the cache
-  if (HOT_WRITE.test(req.sql)) hotCache.clear();
+  // write path: invalidate every cache entry touching the written tables
+  if (req.want !== "rows") {
+    const tables = tablesOf(req.sql);
+    if (tables.size > 0) readCacheInvalidate(tables);
+  }
   return handleQuery(req);
 }
 
