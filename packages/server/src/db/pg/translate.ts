@@ -336,7 +336,13 @@ function qualifyDoUpdateSetRefs(sql: string): string {
         const word = rhs.slice(i, j);
         const before = i > 0 ? rhs[i - 1] : "";
         const after = j < rhs.length ? rhs[j] : "";
-        if (targets.includes(word) && before !== "." && after !== "(") {
+        if (
+          targets.includes(word) &&
+          before !== "." &&
+          before !== ":" && // :output is a NAMED PARAM — convertPlaceholders runs later
+          before !== "$" &&
+          after !== "("
+        ) {
           out += `${table}.${word}`;
         } else {
           out += word;
