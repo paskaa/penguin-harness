@@ -99,6 +99,7 @@ export function splitStatements(sql: string): string[] {
 /** Convert `?` and `:name` placeholders to `$n`. Returns the named-param order. */
 export function convertPlaceholders(sql: string): { sql: string; named: string[] } {
   const named: string[] = [];
+  const nameNum = new Map<string, number>();
   let out = "";
   let i = 0;
   const n = sql.length;
@@ -163,9 +164,17 @@ export function convertPlaceholders(sql: string): { sql: string; named: string[]
       let j = i + 1;
       while (j < n && /[A-Za-z0-9_]/.test(sql[j])) j += 1;
       const name = sql.slice(i + 1, j);
-      if (!named.includes(name)) named.push(name);
-      idx += 1;
-      out += `$${idx}`;
+      // Same named param used N times → ONE placeholder ($n). Callers bind one
+      // value per NAME (node:sqlite semantics), so per-occurrence numbering
+      // produced "supplies 1 parameters, but prepared statement requires 3".
+      let num = nameNum.get(name);
+      if (num === undefined) {
+        idx += 1;
+        num = idx;
+        nameNum.set(name, num);
+        named.push(name);
+      }
+      out += `$${num}`;
       i = j;
       continue;
     }
