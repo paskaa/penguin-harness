@@ -773,11 +773,8 @@ export function agentSessionsRoutes(deps: SessionsRouteDeps): Hono<AppEnv> {
       rawExcludeOrg ?? "",
       JSON.stringify(paging),
     ].join("::");
-    const hit = sessionsListCache.get(cacheKey);
-    if (hit && Date.now() - hit.at < SESSIONS_LIST_TTL) return c.json(hit.body);
-    let pending = sessionsListInFlight.get(cacheKey);
-    if (!pending) {
-      pending = deps.sessionService
+    const buildList = () =>
+      deps.sessionService
         .listSessions(projectId, agentId, {
           ...(paging ? { paging } : {}),
           order,
@@ -792,15 +789,34 @@ export function agentSessionsRoutes(deps: SessionsRouteDeps): Hono<AppEnv> {
           ...(out.workspaceCounts ? { workspaceCounts: out.workspaceCounts } : {}),
           ...(out.workspaceLatest ? { workspaceLatest: out.workspaceLatest } : {}),
           ...(out.workspaceLatestActive ? { workspaceLatestActive: out.workspaceLatestActive } : {}),
-        }))
-        .finally(() => {
-          sessionsListInFlight.delete(cacheKey);
-        });
-      sessionsListInFlight.set(cacheKey, pending);
+        }));
+    const refresh = (): Promise<unknown> => {
+      // one background rebuild at a time per shape; failures just leave the stale
+      // entry in place (the next request retries the refresh)
+      let p = sessionsListInFlight.get(cacheKey);
+      if (!p) {
+        p = buildList()
+          .then((body) => {
+            if (sessionsListCache.size > 300) sessionsListCache.clear();
+            sessionsListCache.set(cacheKey, { at: Date.now(), body });
+            return body;
+          })
+          .finally(() => {
+            sessionsListInFlight.delete(cacheKey);
+          });
+        sessionsListInFlight.set(cacheKey, p);
+      }
+      return p;
+    };
+    const hit = sessionsListCache.get(cacheKey);
+    if (hit) {
+      if (Date.now() - hit.at < SESSIONS_LIST_TTL) return c.json(hit.body);
+      // stale-while-revalidate: answer from the stale body NOW, rebuild in the
+      // background — a poll never waits for the multi-hundred-ms rebuild.
+      void refresh();
+      return c.json(hit.body);
     }
-    const body = await pending;
-    if (sessionsListCache.size > 300) sessionsListCache.clear();
-    sessionsListCache.set(cacheKey, { at: Date.now(), body });
+    const body = await refresh();
     return c.json(body as SessionsResponse);
   });
 
