@@ -116,6 +116,7 @@ import { SchedulerRoutes } from "./http/routes/schedules.js";
 import { Machines, MachinesModule } from "./machines/service.js";
 import { OrganizationModule, OrgScheduler, OrgService } from "./runtime/organization/service.js";
 import { OrgRoutes } from "./http/routes/organizations.js";
+import { SquadRoutes } from "./http/routes/squad.js";
 import { OrgRuns, OrgSessions } from "./runtime/organization/deps.js";
 import { TerminalRelay } from "./machines/terminal-relay.js";
 import { ProjectAdminRoutes } from "./http/routes/projects.js";
@@ -448,7 +449,7 @@ export class MessagingHubModule {}
  * Project deletion reach for leave the group, as OrgCache.
  */
 @Module({
-  children: [OrgCacheRepo, OrganizationModule, OrgRoutes],
+  children: [OrgCacheRepo, OrganizationModule, OrgRoutes, SquadRoutes],
   exports: [OrgCache, OrgService, OrgScheduler],
 })
 export class CompanyModule {}

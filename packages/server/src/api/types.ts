@@ -4450,6 +4450,32 @@ export interface ScheduleFireResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Squad review vote (LOCAL-ONLY: this machine's squad registries, not upstream)
+// ---------------------------------------------------------------------------
+
+/** One squad registry's vote-gate switch (GET /api/squad/review-vote). */
+export interface SquadReviewVoteTable {
+  /** Registry key (`hub`, `tracker`). */
+  key: string;
+  /** Display label for the UI. */
+  label: string;
+  /** Absolute path of the `config.json` this row reads and writes. */
+  path: string;
+  /** True = the three-expert panel closes `in_review` tickets; false = a human still does. */
+  reviewVote: boolean;
+}
+
+export interface SquadReviewVoteResponse {
+  tables: SquadReviewVoteTable[];
+}
+
+/** PUT /api/squad/review-vote: `key` omitted flips every registry at once. */
+export interface SquadReviewVoteUpdate {
+  reviewVote: boolean;
+  key?: string;
+}
+
+// ---------------------------------------------------------------------------
 // Agent State version and snapshots
 // ---------------------------------------------------------------------------
 
