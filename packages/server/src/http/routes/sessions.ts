@@ -799,6 +799,17 @@ export function agentSessionsRoutes(deps: SessionsRouteDeps): Hono<AppEnv> {
           .then((body) => {
             if (sessionsListCache.size > 300) sessionsListCache.clear();
             sessionsListCache.set(cacheKey, { at: Date.now(), body });
+            // Warm the newest sessions' shards in the parse worker: the conversation open
+            // that follows this poll hits a warm cache instead of a cold parse.
+            void deps.traces
+              .warmSessions(
+                body.sessions.slice(0, 8).map((s) => ({
+                  projectId,
+                  agentId,
+                  sessionId: s.sessionId,
+                })),
+              )
+              .catch(() => undefined);
             return body;
           })
           .finally(() => {

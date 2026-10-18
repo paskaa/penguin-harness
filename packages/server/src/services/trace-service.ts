@@ -414,6 +414,30 @@ export class TraceService implements Traces {
    * MUST offset by it; treating a truncated window as a whole shard is what makes a
    * mid-shard window look like the beginning of the transcript.
    */
+  /**
+   * Warm the shard cache for the most recently listed Sessions: the sidebar's poll hands
+   * us its top rows, and their latest shards are parsed here in the worker (deduped,
+   * best-effort) so the conversation open that follows hits a warm cache instead of a
+   * multi-second cold parse.
+   */
+  async warmSessions(
+    rows: ReadonlyArray<{ projectId: string; agentId: string; sessionId: string }>,
+    max = 8,
+  ): Promise<void> {
+    for (const row of rows.slice(0, max)) {
+      try {
+        const files = this.store.listFilesBySession(row.projectId, row.agentId, row.sessionId);
+        const latest = files.at(-1);
+        if (!latest) continue;
+        const path = traceFilePath(this.root, latest);
+        if (this.shardCache.has(path) || this.shardParseInFlight.has(path)) continue;
+        await this.readShard(path);
+      } catch {
+        // best-effort warm: a failed shard parse just means the open pays the cold read
+      }
+    }
+  }
+
   private async readShard(
     path: string,
     tailFromEnd?: number,
