@@ -939,17 +939,72 @@ export class SessionService {
    * hands it to the new session's `[model_switch_from]` block so the model can read the
    * source history itself when it needs it.
    */
+  /** TTL cache for latestTracePath: repeat detail reads of one Session skip the
+   * (mtime-gated) reconcile + index lookup entirely for 3s. Negative results cached
+   * too (a session with no trace yet). */
+  private latestTraceTtl = new Map<string, { at: number; path: string | undefined }>();
+
+  /**
+   * Deterministic direct lookup: Trace shards are named `<date>/<sessionId>_<index3>.jsonl`
+   * under the Agent's traces dir, so a name-filtered readdir over the date dirs (no stat,
+   * no head reads) answers "is the disk ahead of the index" in tens of milliseconds —
+   * vs the forced reconcile's walk over the whole multi-thousand-shard tree. Returns the
+   * absolute path of the highest (date, index) shard, or undefined.
+   */
+  private async quickLatestTracePath(row: SessionRow): Promise<string | undefined> {
+    const dir = tracesDir(this.deps.root, row.projectId, row.agentId);
+    const prefix = `${row.sessionId}_`;
+    try {
+      const dateDirs = (await fs.readdir(dir, { withFileTypes: true }))
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name)
+        .sort();
+      let best: string | undefined;
+      for (const d of dateDirs) {
+        let bestIdx = -1;
+        for (const n of await fs.readdir(path.join(dir, d))) {
+          if (n.startsWith(prefix) && n.endsWith(".jsonl")) {
+            const idx = Number(n.slice(prefix.length, -".jsonl".length));
+            if (Number.isInteger(idx) && idx > bestIdx) bestIdx = idx;
+          }
+        }
+        if (bestIdx >= 0) {
+          best = path.join(dir, d, `${prefix}${String(bestIdx).padStart(3, "0")}.jsonl`);
+        }
+      }
+      return best;
+    } catch {
+      return undefined;
+    }
+  }
+
   async latestTracePath(row: SessionRow): Promise<string | undefined> {
+    const cacheKey = `${row.projectId}/${row.agentId}/${row.sessionId}`;
+    const cached = this.latestTraceTtl.get(cacheKey);
+    if (cached && Date.now() - cached.at < 3000) return cached.path;
     await this.deps.traceIndex.reconcileAgent(row.projectId, row.agentId);
     let files = this.deps.traceStore.listFilesBySession(row.projectId, row.agentId, row.sessionId);
     if (files.length === 0) {
-      // Index miss with disk possibly ahead: one forced diff, then retry (the consumers'
-      // rule — a stale index costs one extra scan, never a missing resume shard).
+      // Index miss with disk possibly ahead: try the deterministic direct lookup FIRST —
+      // the forced reconcile walks the whole Agent trace tree (seconds on a multi-thousand-
+      // shard Agent) and a brand-new Session pays it on every open until its rows land.
+      // The quick scan answers in milliseconds; only when it finds nothing does the forced
+      // diff run (the consumers' rule — a stale index costs one extra scan, never a
+      // missing resume shard — still holds for anything a name scan cannot see).
+      const quick = await this.quickLatestTracePath(row);
+      if (quick !== undefined) {
+        if (this.latestTraceTtl.size > 2000) this.latestTraceTtl.clear();
+        this.latestTraceTtl.set(cacheKey, { at: Date.now(), path: quick });
+        return quick;
+      }
       await this.deps.traceIndex.reconcileAgent(row.projectId, row.agentId, { force: true });
       files = this.deps.traceStore.listFilesBySession(row.projectId, row.agentId, row.sessionId);
     }
     const latest = files.at(-1);
-    return latest === undefined ? undefined : traceFilePath(this.deps.root, latest);
+    const result = latest === undefined ? undefined : traceFilePath(this.deps.root, latest);
+    if (this.latestTraceTtl.size > 2000) this.latestTraceTtl.clear();
+    this.latestTraceTtl.set(cacheKey, { at: Date.now(), path: result });
+    return result;
   }
 
   /**
