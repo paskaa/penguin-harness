@@ -100,7 +100,10 @@ export function usageRoutes(deps: UsageRouteDeps): Hono<AppEnv> {
  * viewers); bounded size.
  */
 const usageCache = new Map<string, { at: number; body: unknown }>();
-const USAGE_TTL_MS = 5000;
+// Aligned with the 30s key-quantization bucket: at most ONE aggregate re-run per
+// bucket per shape (the bucket boundary is when a miss can happen). Usage charts
+// lag at most 30s — the same staleness the quantized key already accepts.
+const USAGE_TTL_MS = 30000;
 // Rolling fromTs/toTs the dashboard computes client-side change every request; quantize
 // them to 30s buckets in the KEY only (the served body's exact window differs by <30s —
 // invisible on the charts) so consecutive polls share entries.
