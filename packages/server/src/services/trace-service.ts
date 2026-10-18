@@ -358,6 +358,9 @@ export class TraceService implements Traces {
    * splice/sort the array for their own shape.
    */
   private shardCache = new Map<string, { parsedBytes: number; messages: OmniMessage[] }>();
+  // in-flight cold parses keyed by shard path: the web's double-fetch fires two
+  // identical reads concurrently; both share ONE worker parse.
+  private shardParseInFlight = new Map<string, Promise<OmniMessage[]>>();
 
   /**
    * All of this Session's Trace files (sorted by index ascending), served from the
@@ -462,36 +465,45 @@ export class TraceService implements Traces {
       this.shardCache.set(path, hit);
       return { messages: hit.messages.slice(), firstOrdinal: 0 };
     }
-    // Off-loop parse: the multi-second synchronous parseTraceLines must not freeze the
-    // event loop (every other endpoint stalls behind it). The sync fallback keeps the
-    // behavior identical if the worker cannot run.
-    let full: OmniMessage[];
-    try {
-      full = await parseTraceFileOffLoop(path);
-    } catch {
-      full = await readTraceTolerant(path);
+    // Cold parse — deduped across concurrent callers (the web's double-fetch shares ONE
+    // worker parse); the multi-second synchronous parseTraceLines runs OFF the event
+    // loop, with a sync fallback that keeps behavior identical if the worker cannot run.
+    let parseP = this.shardParseInFlight.get(path);
+    if (!parseP) {
+      parseP = (async (): Promise<OmniMessage[]> => {
+        let full: OmniMessage[];
+        try {
+          full = await parseTraceFileOffLoop(path);
+        } catch {
+          full = await readTraceTolerant(path);
+        }
+        if (this.shardCache.size >= 40) {
+          const oldest = this.shardCache.keys().next().value;
+          if (oldest !== undefined) this.shardCache.delete(oldest);
+        }
+        // parsedBytes = offset AFTER the last complete newline: readTraceTolerant tolerates a
+        // trailing partial line, but the incremental branch must not skip it forever.
+        let parsed = st.size;
+        if (parsed > 0) {
+          const win = Math.min(8192, parsed);
+          const buf = Buffer.alloc(win);
+          const fh = await fs.open(path, "r");
+          try {
+            await fh.read(buf, 0, win, parsed - win);
+          } finally {
+            await fh.close();
+          }
+          const t = buf.toString("utf-8");
+          const lastNL = t.lastIndexOf("\n");
+          parsed = lastNL >= 0 ? parsed - win + lastNL + 1 : 0;
+        }
+        this.shardCache.set(path, { parsedBytes: parsed, messages: full });
+        return full;
+      })();
+      this.shardParseInFlight.set(path, parseP);
+      void parseP.catch(() => undefined).finally(() => this.shardParseInFlight.delete(path));
     }
-    if (this.shardCache.size >= 40) {
-      const oldest = this.shardCache.keys().next().value;
-      if (oldest !== undefined) this.shardCache.delete(oldest);
-    }
-    // parsedBytes = offset AFTER the last complete newline: readTraceTolerant tolerates a
-    // trailing partial line, but the incremental branch must not skip it forever.
-    let parsed = st.size;
-    if (parsed > 0) {
-      const win = Math.min(8192, parsed);
-      const buf = Buffer.alloc(win);
-      const fh = await fs.open(path, "r");
-      try {
-        await fh.read(buf, 0, win, parsed - win);
-      } finally {
-        await fh.close();
-      }
-      const t = buf.toString("utf-8");
-      const lastNL = t.lastIndexOf("\n");
-      parsed = lastNL >= 0 ? parsed - win + lastNL + 1 : 0;
-    }
-    this.shardCache.set(path, { parsedBytes: parsed, messages: full });
+    const full = await parseP;
     return { messages: full.slice(), firstOrdinal: 0 };
   }
 
