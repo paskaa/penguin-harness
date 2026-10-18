@@ -207,6 +207,7 @@ interface ReadCacheEntry {
   tables: Set<string>;
 }
 const readCache = new Map<string, ReadCacheEntry>();
+const readCacheInFlight = new Map<string, Promise<Result>>();
 const readCacheIndex = new Map<string, Set<string>>();
 
 const VOLATILE_SQL = /\b(random\s*\(|now\s*\(|clock_timestamp|current_timestamp|current_date|pg_sleep|pg_stat_)\b/i;
@@ -309,10 +310,21 @@ async function handleOnce(req: Req): Promise<Result> {
     const key = readCacheKey(req);
     const hit = readCacheGet(key);
     if (hit) return hit.result;
+    // The web's double-fetch fires identical reads concurrently; share ONE in-flight
+    // query between them instead of doubling the miss cost.
+    const pending = readCacheInFlight.get(key);
+    if (pending) return pending;
     const tables = tablesOf(req.sql);
-    const res = await handleQuery(req);
-    if (res.rows && tables.size > 0) readCachePut(key, tables, res);
-    return res;
+    const exec = handleQuery(req)
+      .then((res) => {
+        if (res.rows && tables.size > 0) readCachePut(key, tables, res);
+        return res;
+      })
+      .finally(() => {
+        readCacheInFlight.delete(key);
+      });
+    readCacheInFlight.set(key, exec);
+    return exec;
   }
   // write path: invalidate every cache entry touching the written tables
   if (req.want !== "rows") {
