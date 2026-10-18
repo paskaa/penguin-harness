@@ -261,3 +261,21 @@ export * from "./components/shell/session-row/session-row";
 
 // The drag image every draggable row hands the browser: an opaque, themed copy of the row.
 export * from "./components/overlays/drag-preview/drag-preview";
+
+// 进化树新增组件（2026-10-18 整合）
+export * from "./components/chat/attachments/attachments";
+export * from "./components/content/find/find-dom";
+export * from "./components/content/find/find-field";
+export * from "./components/content/find/find-text";
+export * from "./components/content/markdown-reader/markdown-reader";
+export * from "./components/content/markdown-reader/outline";
+export * from "./components/feedback/pill/pill";
+export * from "./components/files/files-frame/files-frame";
+export * from "./components/files/files-frame/files-layout";
+export * from "./components/layout/measure/use-measured-width";
+export * from "./components/machines/add-machine/add-machine";
+export * from "./components/machines/machine-card/machine-card";
+export * from "./components/machines/machine-list/machine-list";
+export * from "./components/machines/machine-status/machine-status";
+export * from "./components/machines/machine-stepper/machine-stepper";
+export * from "./components/machines/machine-toolbar/machine-toolbar";
