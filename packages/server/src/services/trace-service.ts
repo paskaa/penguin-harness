@@ -361,6 +361,7 @@ export class TraceService implements Traces {
   // in-flight cold parses keyed by shard path: the web's double-fetch fires two
   // identical reads concurrently; both share ONE worker parse.
   private shardParseInFlight = new Map<string, Promise<OmniMessage[]>>();
+  private warmAt = new Map<string, number>();
 
   /**
    * All of this Session's Trace files (sorted by index ascending), served from the
@@ -424,14 +425,25 @@ export class TraceService implements Traces {
     rows: ReadonlyArray<{ projectId: string; agentId: string; sessionId: string }>,
     max = 8,
   ): Promise<void> {
+    const now = Date.now();
+    let warmed = 0;
     for (const row of rows.slice(0, max)) {
+      if (warmed >= 4) break;
       try {
         const files = this.store.listFilesBySession(row.projectId, row.agentId, row.sessionId);
         const latest = files.at(-1);
         if (!latest) continue;
         const path = traceFilePath(this.root, latest);
         if (this.shardCache.has(path) || this.shardParseInFlight.has(path)) continue;
+        // Throttle: skip oversized shards (the warm itself would eat the CPU), and warm
+        // the same shard at most once every 10 minutes.
+        const st = await fs.stat(path);
+        if (st.size > 2 * 1024 * 1024) continue;
+        const last = this.warmAt.get(path);
+        if (last !== undefined && now - last < 600000) continue;
+        this.warmAt.set(path, now);
         await this.readShard(path);
+        warmed++;
       } catch {
         // best-effort warm: a failed shard parse just means the open pays the cold read
       }
