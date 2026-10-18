@@ -613,5 +613,61 @@ export class Scheduler implements Scheduling {
 
   async fireNow(
     projectId: string,
+    agentId: string,
+    name: string,
+  ): Promise<{ sessionId: string; queued: boolean }> {
+    const { entries, invalid } = await this.listAgent(projectId, agentId);
+    const entry = entries.find((e) => e.def.name === name);
+    if (!entry) {
+      const bad = invalid.find((i) => i.name === name);
+      if (bad)
+        throw new ScheduleFireError(
+          "schedule_invalid",
+          `Schedule ${name} is invalid and cannot fire: ${bad.error}`,
+        );
+      throw new ScheduleFireError("schedule_not_found", `Schedule does not exist: ${name}`);
+    }
+    const { def, state } = entry;
+    if (state.invalidReason !== null)
+      throw new ScheduleFireError(
+        "schedule_invalid",
+        `Schedule ${name} is invalid and cannot fire: ${state.invalidReason}`,
+      );
+    if (def.sessionId !== undefined) {
+      const row = this.sessions.findById(def.sessionId);
+      if (!row || row.projectId !== projectId || row.agentId !== agentId) {
+        // Same handling as a scheduled fire hitting a lost Session (mark invalid so a
+        // file edit re-activates it, record the error) — but a manual fire also tells
+        // its caller, which the scheduled path has none of.
+        this.errors.record({
+          source: "schedule",
+          err: new Error(
+            `Schedule ${def.name} is bound to a Session that does not exist: ${def.sessionId}`,
+          ),
+          code: "schedule_session_missing",
+          ctx: { projectId, agentId, sessionId: def.sessionId },
+        });
+        this.repo.markInvalid(projectId, agentId, def.name, "session_missing");
+        throw new ScheduleFireError(
+          "schedule_session_missing",
+          `Schedule ${name} is bound to a Session that does not exist: ${def.sessionId}`,
+        );
+      }
+    }
+    const fired = await this.dispatch(projectId, agentId, def, state, { manual: true });
+    if (!fired) {
+      // Bound mode only fails on a Session lost between the check above and the
+      // dispatch; new-Session mode only on Session-creation failure (recorded).
+      if (def.sessionId !== undefined)
+        throw new ScheduleFireError(
+          "schedule_session_missing",
+          `Schedule ${name} is bound to a Session that does not exist: ${def.sessionId}`,
+        );
+      throw new ScheduleFireError(
+        "schedule_fire_failed",
+        `Schedule ${name} could not open a Session for its firing.`,
+      );
+    }
+    return fired;
+  }
 }
-
