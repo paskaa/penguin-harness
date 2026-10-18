@@ -705,6 +705,17 @@ export function sessionsBatchRoutes(deps: SessionsRouteDeps): Hono<AppEnv> {
 }
 
 /** Agent-level entry: /api/projects/:p/agents/:a/sessions. */
+//
+// Short-TTL response cache: the sidebar re-polls this list every few seconds and the
+// unpaged shape builds a SessionInfo per row (7500+ on a busy Agent) plus a multi-MB
+// JSON body each time. 3s staleness is invisible next to the poll cadence, and live
+// status still flows through SSE. Keyed by the FULL request shape + userId (org
+// visibility differs per viewer); concurrent identical requests share one in-flight
+// build (the web's double-fetch); bounded size.
+const SESSIONS_LIST_TTL = 3000;
+const sessionsListCache = new Map<string, { at: number; body: unknown }>();
+const sessionsListInFlight = new Map<string, Promise<unknown>>();
+
 export function agentSessionsRoutes(deps: SessionsRouteDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
 
@@ -751,22 +762,46 @@ export function agentSessionsRoutes(deps: SessionsRouteDeps): Hono<AppEnv> {
     if (rawExcludeOrg !== undefined && rawExcludeOrg !== "1") {
       throw badRequest("excludeOrg only accepts 1.");
     }
-    const { sessions, counts, workspaceCounts, workspaceLatest, workspaceLatestActive } =
-      await deps.sessionService.listSessions(projectId, agentId, {
-        ...(paging ? { paging } : {}),
-        order,
-        ...(rawCategory !== undefined ? { category: rawCategory as SessionCategory } : {}),
-        ...(rawWorkspaceGroup !== undefined ? { workspaceGroup: rawWorkspaceGroup } : {}),
-        ...(rawCounts !== undefined ? { withCounts: true } : {}),
-        ...(rawExcludeOrg !== undefined ? { excludeOrg: true } : {}),
-      });
-    return c.json({
-      sessions,
-      ...(counts ? { counts } : {}),
-      ...(workspaceCounts ? { workspaceCounts } : {}),
-      ...(workspaceLatest ? { workspaceLatest } : {}),
-      ...(workspaceLatestActive ? { workspaceLatestActive } : {}),
-    } satisfies SessionsResponse);
+    const cacheKey = [
+      c.var.user.userId,
+      projectId,
+      agentId,
+      order,
+      rawCategory ?? "",
+      rawWorkspaceGroup ?? "",
+      rawCounts ?? "",
+      rawExcludeOrg ?? "",
+      JSON.stringify(paging),
+    ].join("::");
+    const hit = sessionsListCache.get(cacheKey);
+    if (hit && Date.now() - hit.at < SESSIONS_LIST_TTL) return c.json(hit.body);
+    let pending = sessionsListInFlight.get(cacheKey);
+    if (!pending) {
+      pending = deps.sessionService
+        .listSessions(projectId, agentId, {
+          ...(paging ? { paging } : {}),
+          order,
+          ...(rawCategory !== undefined ? { category: rawCategory as SessionCategory } : {}),
+          ...(rawWorkspaceGroup !== undefined ? { workspaceGroup: rawWorkspaceGroup } : {}),
+          ...(rawCounts !== undefined ? { withCounts: true } : {}),
+          ...(rawExcludeOrg !== undefined ? { excludeOrg: true } : {}),
+        })
+        .then((out) => ({
+          sessions: out.sessions,
+          ...(out.counts ? { counts: out.counts } : {}),
+          ...(out.workspaceCounts ? { workspaceCounts: out.workspaceCounts } : {}),
+          ...(out.workspaceLatest ? { workspaceLatest: out.workspaceLatest } : {}),
+          ...(out.workspaceLatestActive ? { workspaceLatestActive: out.workspaceLatestActive } : {}),
+        }))
+        .finally(() => {
+          sessionsListInFlight.delete(cacheKey);
+        });
+      sessionsListInFlight.set(cacheKey, pending);
+    }
+    const body = await pending;
+    if (sessionsListCache.size > 300) sessionsListCache.clear();
+    sessionsListCache.set(cacheKey, { at: Date.now(), body });
+    return c.json(body as SessionsResponse);
   });
 
   app.post("/", async (c) => {
