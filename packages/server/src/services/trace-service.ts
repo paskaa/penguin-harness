@@ -55,6 +55,7 @@ import type { TraceFileRow, TraceSessionRow } from "../db/repos/trace-index.js";
 import { HttpError } from "../http/errors.js";
 import { formatLocalDate } from "../internal/dates.js";
 import { readTraceTailLines } from "../internal/trace-tail.js";
+import { parseTraceFileOffLoop } from "../internal/trace-parse-pool.js";
 import type { TraceTailRead } from "../internal/trace-tail.js";
 import {
   ratesAt,
@@ -461,7 +462,15 @@ export class TraceService implements Traces {
       this.shardCache.set(path, hit);
       return { messages: hit.messages.slice(), firstOrdinal: 0 };
     }
-    const full = await readTraceTolerant(path);
+    // Off-loop parse: the multi-second synchronous parseTraceLines must not freeze the
+    // event loop (every other endpoint stalls behind it). The sync fallback keeps the
+    // behavior identical if the worker cannot run.
+    let full: OmniMessage[];
+    try {
+      full = await parseTraceFileOffLoop(path);
+    } catch {
+      full = await readTraceTolerant(path);
+    }
     if (this.shardCache.size >= 40) {
       const oldest = this.shardCache.keys().next().value;
       if (oldest !== undefined) this.shardCache.delete(oldest);

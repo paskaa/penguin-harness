@@ -81,6 +81,20 @@ export default defineConfig({
       sourcemap: true,
       logLevel: "silent",
     });
+    // The trace parse worker: parseTraceLines is synchronous CPU work that froze the
+    // event loop on multi-MB shards (every other endpoint stalled behind it); this CJS
+    // bundle runs the read+parse in its own thread.
+    await esbuild.build({
+      entryPoints: [path.join(here, "src/internal/trace-parse-worker-entry.ts")],
+      outfile: path.join(here, "dist/internal/trace-parse-worker.cjs"),
+      bundle: true,
+      format: "cjs",
+      platform: "node",
+      target: "node24",
+      external: ["pg-native"],
+      sourcemap: true,
+      logLevel: "silent",
+    });
     for (const { name, from } of FAR_SIDE_SCRIPTS) {
       fs.copyFileSync(path.join(repo, from), path.join(here, "dist", name));
     }
