@@ -15,7 +15,8 @@
 import { createHash } from "node:crypto";
 import { Hono } from "hono";
 import { isValidId } from "@prismshadow/penguin-core";
-import type { ProjectSchedulesResponse, ScheduleItem, SchedulesResponse } from "../../api/types.js";
+import type { ProjectSchedulesResponse, ScheduleItem, SchedulesResponse
+  ScheduleFireResponse,} from "../../api/types.js";
 import type { AppEnv } from "../../auth/middleware.js";
 import type { ServerConfig } from "../../config.js";
 
@@ -57,6 +58,7 @@ import type { Config } from "../../hmr/capabilities.js";
 import type { Access, ProjectConfigStore } from "../../mechanisms/projects.js";
 import type { Schedules, Scheduling } from "../../mechanisms/sessions.js";
 import type { AgentConfig } from "../../mechanisms/agents.js";
+import { ScheduleFireError } from "../../runtime/scheduler.js";
 
 /** Validate and shape the POST/PUT request body into file fields (semantic validation is left to parseScheduleFile). */
 function parseUpsertBody(body: Record<string, unknown>): {
@@ -292,7 +294,28 @@ async function upsert(
     startAtMs: parsed.def.startAtMs,
     defHash: createHash("sha1").update(raw).digest("hex"),
     creatorUserId: userId,
+  })
+
+  app.post("/:name/fire", async (c) => {
+    const projectId = requireValidId(c, "projectId");
+    const agentId = requireValidId(c, "agentId");
+    deps.access.requireProjectOwner(c.var.user.userId, projectId);
+    await deps.agentConfigService.requireExists(projectId, agentId);
+    const name = requireScheduleName(c.req.param("name"));
+    try {
+      const fired = await deps.scheduler.fireNow(projectId, agentId, name);
+      const res: ScheduleFireResponse = { sessionId: fired.sessionId, queued: fired.queued };
+      return c.json(res);
+    } catch (err) {
+      if (err instanceof ScheduleFireError) {
+        if (err.code === "schedule_not_found") throw new HttpError(404, err.code, err.message);
+        if (err.code === "schedule_fire_failed") throw new HttpError(500, err.code, err.message);
+        throw new HttpError(400, err.code, err.message);
+      }
+      throw err;
+    }
   });
+;
   await deps.scheduler.reconcileAgent(projectId, agentId);
 }
 

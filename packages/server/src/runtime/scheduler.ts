@@ -54,6 +54,20 @@ import type {
 import type { ProjectConfigStore, Projects } from "../mechanisms/projects.js";
 import type { Errors } from "../mechanisms/observability.js";
 
+export class ScheduleFireError extends Error {
+  constructor(
+    readonly code:
+      | "schedule_not_found"
+      | "schedule_invalid"
+      | "schedule_session_missing"
+      | "schedule_fire_failed",
+    message: string,
+  ) {
+    super(message);
+    this.name = "ScheduleFireError";
+  }
+}
+
 /** Reconcile and fire-check interval (min period is 5m, so 30s granularity is plenty). */
 const TICK_INTERVAL_MS = 30_000;
 
@@ -596,4 +610,10 @@ export class Scheduler implements Scheduling {
     const userId = state.creatorUserId;
     if (userId) this.notify(userId, event);
   }
+  async fireNow(
+    projectId: string,
+    agentId: string,
+    name: string,
+  ): Promise<{ sessionId: string; queued: boolean }> {
+
 }
