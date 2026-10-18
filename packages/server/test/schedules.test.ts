@@ -2,7 +2,10 @@
  * Integration tests for the schedule routes: CRUD and permissions (any member can read, only the owner can
  * modify, outsiders get 404), 400 validation, 409 on name collision, hand-edited
  * invalid files landing in invalidFiles, expired one-shot tasks marked missed
- * during reconciliation, and the on-disk file shape.
+ * during reconciliation, the on-disk file shape, and the manual fire endpoint
+ * (POST /:name/fire: owner-only, coded 404/400s, missing-Session marking).
+ * A fire that actually sends would start a real Session run, so happy-path dispatch
+ * is covered by scheduler.test.ts doubles instead.
  */
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -291,5 +294,48 @@ describe("schedules api", () => {
 
     // Same access rule as the per-Agent list: an outsider is told the Project is not there.
     expect((await outsider.get(`/api/projects/${projectId}/schedules`)).status).toBe(404);
+  });
+
+  it("POST /:name/fire is owner-only; unknown names 404 with schedule_not_found", async () => {
+    expect((await member.post(`${base}/nope/fire`)).status).toBe(403);
+    const res = await owner.post(`${base}/nope/fire`);
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
+      "schedule_not_found",
+    );
+  });
+
+  it("POST /:name/fire on an invalid file 400s with schedule_invalid", async () => {
+    const dir = scheduleDir(t.root, projectId, "default_agent");
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, "broken.toml"), "not = toml =", "utf8");
+    const res = await owner.post(`${base}/broken/fire`);
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe("schedule_invalid");
+  });
+
+  it("POST /:name/fire on a task bound to a missing Session 400s and marks it invalid", async () => {
+    // The API accepts the binding at save time (like the Project-wide test above);
+    // the missing Session only surfaces when the task actually fires.
+    expect(
+      (
+        await owner.post(base, {
+          name: "lost-bind",
+          prompt: "p",
+          enabled: true,
+          startAt: FUTURE,
+          period: "30m",
+          sessionId: "session-nope",
+        })
+      ).status,
+    ).toBe(201);
+    const res = await owner.post(`${base}/lost-bind/fire`);
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
+      "schedule_session_missing",
+    );
+    const item = (await (await owner.get(`${base}/lost-bind`)).json()) as ScheduleItem;
+    expect(item.status).toBe("invalid");
+    expect(item.invalidReason).toBe("session_missing");
   });
 });
