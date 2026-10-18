@@ -356,7 +356,7 @@ export class TraceService implements Traces {
    * LRU by re-insertion, capped at 40 shards. Callers get a SHALLOW copy: several
    * splice/sort the array for their own shape.
    */
-  private shardCache = new Map<string, { key: string; messages: OmniMessage[] }>();
+  private shardCache = new Map<string, { parsedBytes: number; messages: OmniMessage[] }>();
 
   /**
    * All of this Session's Trace files (sorted by index ascending), served from the
@@ -429,11 +429,34 @@ export class TraceService implements Traces {
       const read: TraceTailRead = await readTraceTailLines(path, tailFromEnd);
       return { messages: read.messages, firstOrdinal: read.skippedUnits };
     }
-    // Full-transcript read: (size, mtime)-validated cache (see shardCache).
+    // Full-transcript read: append-aware cache (see shardCache). Shards are
+    // append-only JSONL, so a cached prefix stays valid as the file grows — an
+    // actively-appending session re-parses ONLY the newly appended bytes.
+    // st.size < parsedBytes => truncated/rotated => full re-parse.
     const st = await fs.stat(path);
-    const freshKey = st.size + ":" + String(st.mtimeMs);
     const hit = this.shardCache.get(path);
-    if (hit && hit.key === freshKey) {
+    if (hit && st.size >= hit.parsedBytes) {
+      if (st.size > hit.parsedBytes) {
+        const fh = await fs.open(path, "r");
+        try {
+          const len = st.size - hit.parsedBytes;
+          const buf = Buffer.alloc(len);
+          await fh.read(buf, 0, len, hit.parsedBytes);
+          const text = buf.toString("utf-8");
+          const lastNL = text.lastIndexOf("\n");
+          if (lastNL >= 0) {
+            // parseTraceLines tolerates a truncated last line, but only bytes up to
+            // the last complete newline advance the offset — a partial line is
+            // re-read (and completed) on the next call, never skipped forever.
+            const complete = text.slice(0, lastNL + 1);
+            hit.messages.push(...parseTraceLines(complete));
+            hit.parsedBytes += Buffer.byteLength(complete, "utf-8");
+          }
+          // no complete line in the chunk yet: parsedBytes stays put
+        } finally {
+          await fh.close();
+        }
+      }
       this.shardCache.delete(path);
       this.shardCache.set(path, hit);
       return { messages: hit.messages.slice(), firstOrdinal: 0 };
@@ -443,7 +466,23 @@ export class TraceService implements Traces {
       const oldest = this.shardCache.keys().next().value;
       if (oldest !== undefined) this.shardCache.delete(oldest);
     }
-    this.shardCache.set(path, { key: freshKey, messages: full });
+    // parsedBytes = offset AFTER the last complete newline: readTraceTolerant tolerates a
+    // trailing partial line, but the incremental branch must not skip it forever.
+    let parsed = st.size;
+    if (parsed > 0) {
+      const win = Math.min(8192, parsed);
+      const buf = Buffer.alloc(win);
+      const fh = await fs.open(path, "r");
+      try {
+        await fh.read(buf, 0, win, parsed - win);
+      } finally {
+        await fh.close();
+      }
+      const t = buf.toString("utf-8");
+      const lastNL = t.lastIndexOf("\n");
+      parsed = lastNL >= 0 ? parsed - win + lastNL + 1 : 0;
+    }
+    this.shardCache.set(path, { parsedBytes: parsed, messages: full });
     return { messages: full.slice(), firstOrdinal: 0 };
   }
 

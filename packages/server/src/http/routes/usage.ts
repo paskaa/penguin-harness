@@ -101,6 +101,19 @@ export function usageRoutes(deps: UsageRouteDeps): Hono<AppEnv> {
  */
 const usageCache = new Map<string, { at: number; body: unknown }>();
 const USAGE_TTL_MS = 5000;
+// Rolling fromTs/toTs the dashboard computes client-side change every request; quantize
+// them to 30s buckets in the KEY only (the served body's exact window differs by <30s —
+// invisible on the charts) so consecutive polls share entries.
+const USAGE_KEY_TTL = 5000;
+const usageInFlight = new Map<string, Promise<unknown>>();
+
+function usageQuantizeKey(key: string): string {
+  return key.replace(/"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[^"]*"/g, (m0) => {
+    const ms = Date.parse(JSON.parse(m0));
+    if (Number.isNaN(ms)) return m0;
+    return JSON.stringify(new Date(Math.floor(ms / 30000) * 30000).toISOString());
+  });
+}
 
   app.get("/", async (c) => {
     // Defensive id validation.
@@ -154,10 +167,18 @@ const USAGE_TTL_MS = 5000;
         ...(modelId !== undefined && modelId !== "" ? { modelId } : {}),
         ...(groupLimit !== undefined ? { groupLimit } : {}),
     };
-    const cacheKey = projectId + "::" + JSON.stringify(usageArgs);
+    const cacheKey = projectId + "::" + usageQuantizeKey(JSON.stringify(usageArgs));
     const hit = usageCache.get(cacheKey);
     if (hit && Date.now() - hit.at < USAGE_TTL_MS) return c.json(hit.body);
-    const body = await deps.usageService.query(projectId, usageArgs);
+    // concurrent identical requests share one in-flight query instead of doubling it
+    let pending = usageInFlight.get(cacheKey);
+    if (!pending) {
+      pending = deps.usageService.query(projectId, usageArgs).finally(() => {
+        usageInFlight.delete(cacheKey);
+      });
+      usageInFlight.set(cacheKey, pending);
+    }
+    const body = await pending;
     if (usageCache.size > 200) usageCache.clear();
     usageCache.set(cacheKey, { at: Date.now(), body });
     return c.json(body);
