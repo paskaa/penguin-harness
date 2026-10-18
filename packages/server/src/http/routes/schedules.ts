@@ -3,22 +3,19 @@
  *   GET|POST   /api/projects/:p/agents/:a/schedules
  *   POST       /api/projects/:p/agents/:a/schedules/template-placeholder  # insert the {{SCHEDULES}} placeholder
  *   GET|PUT|DELETE /api/projects/:p/agents/:a/schedules/:name (name is the file name)
- *   POST       /api/projects/:p/agents/:a/schedules/:name/fire  # fire once now (an extra run; the schedule itself is untouched)
  *   GET        /api/projects/:p/schedules  # every Agent's tasks in the Project, in one list
  * Any member can read; only the owner can modify. The file is declarative intent:
  * POST/PUT fully replace the file, validation always goes through parseScheduleFile
  * (same rules as hand-edited files), and writes take effect immediately via reconciliation.
+ * Two writes are refused: any task whose end_at is already past (it could never fire, and the
+ * scheduler would archive it the moment it landed), and a one-shot whose start_at is already
+ * past (it would fire immediately; "run once now" is not offered — user decision 2026-10-15).
+ * Settled tasks are archived by the scheduler, so no listing here ever shows one.
  */
 import { createHash } from "node:crypto";
 import { Hono } from "hono";
 import { isValidId } from "@prismshadow/penguin-core";
-import type {
-  ProjectSchedulesResponse,
-  ScheduleFireResponse,
-  ScheduleItem,
-  ScheduleStatus,
-  SchedulesResponse,
-} from "../../api/types.js";
+import type { ProjectSchedulesResponse, ScheduleItem, SchedulesResponse } from "../../api/types.js";
 import type { AppEnv } from "../../auth/middleware.js";
 import type { ServerConfig } from "../../config.js";
 
@@ -46,7 +43,6 @@ import {
   parseScheduleFile,
   slotInWindow,
 } from "../../runtime/schedule-file.js";
-import { ScheduleFireError } from "../../runtime/scheduler.js";
 import type { ScheduleStateRow } from "../../db/repos/schedules.js";
 import {
   deleteScheduleFile,
@@ -55,6 +51,7 @@ import {
   validateScheduleModelRef,
   writeScheduleFile,
 } from "../../runtime/schedule-store.js";
+import { scheduleStatus } from "../../runtime/scheduler.js";
 import { Bind, Component, Use } from "@prismshadow/penguin-core/kernel";
 import type { Config } from "../../hmr/capabilities.js";
 import type { Access, ProjectConfigStore } from "../../mechanisms/projects.js";
@@ -115,15 +112,6 @@ function nextFireAt(
   return next !== null ? new Date(next).toISOString() : undefined;
 }
 
-/** Displayed status precedence: invalid > done/missed (one-shot) > expired > enabled flag. */
-function statusOf(def: ScheduleDefinition, state: ScheduleStateRow, nowMs: number): ScheduleStatus {
-  if (state.invalidReason !== null) return "invalid";
-  if (def.periodMs === undefined && state.firedOnce) return "done";
-  if (def.periodMs === undefined && state.missed) return "missed";
-  if (def.endAtMs !== undefined && nowMs > def.endAtMs) return "expired";
-  return def.enabled ? "active" : "disabled";
-}
-
 function toItem(
   def: ScheduleDefinition,
   state: ScheduleStateRow,
@@ -142,7 +130,7 @@ function toItem(
     ...(def.workspace !== undefined ? { workspace: def.workspace } : {}),
     ...(def.modelId !== undefined ? { modelId: def.modelId } : {}),
     ...(def.provider !== undefined ? { provider: def.provider } : {}),
-    status: statusOf(def, state, nowMs),
+    status: scheduleStatus(def, state, nowMs),
     ...(state.invalidReason !== null ? { invalidReason: state.invalidReason } : {}),
     ...(next !== undefined ? { nextFireAt: next } : {}),
     ...(state.lastFiredAt !== null ? { lastFiredAt: state.lastFiredAt } : {}),
@@ -237,28 +225,6 @@ export function scheduleRoutes(deps: SchedulesRouteDeps): Hono<AppEnv> {
     return c.body(null, 204);
   });
 
-  // Fire once now (a hand trigger): the same dispatch as a due slot, but an extra run
-  // that never consumes the schedule — owner-only like every other write, member reads.
-  app.post("/:name/fire", async (c) => {
-    const projectId = requireValidId(c, "projectId");
-    const agentId = requireValidId(c, "agentId");
-    deps.access.requireProjectOwner(c.var.user.userId, projectId);
-    await deps.agentConfigService.requireExists(projectId, agentId);
-    const name = requireScheduleName(c.req.param("name"));
-    try {
-      const fired = await deps.scheduler.fireNow(projectId, agentId, name);
-      const res: ScheduleFireResponse = { sessionId: fired.sessionId, queued: fired.queued };
-      return c.json(res);
-    } catch (err) {
-      if (err instanceof ScheduleFireError) {
-        if (err.code === "schedule_not_found") throw new HttpError(404, err.code, err.message);
-        if (err.code === "schedule_fire_failed") throw new HttpError(500, err.code, err.message);
-        throw new HttpError(400, err.code, err.message);
-      }
-      throw err;
-    }
-  });
-
   return app;
 }
 
@@ -303,6 +269,16 @@ async function upsert(
   const raw = serializeSchedule(fields);
   const parsed = parseScheduleFile(name, raw);
   if (!parsed.ok) throw badRequest(`Invalid schedule configuration: ${parsed.error}`);
+  // A one-shot in the past would fire at once (not offered); a past end_at could never fire.
+  const nowMs = Date.now();
+  if (parsed.def.periodMs === undefined && parsed.def.startAtMs <= nowMs) {
+    throw badRequest("start_at is already past: a one-time task needs a future start time.");
+  }
+  if (parsed.def.endAtMs !== undefined && parsed.def.endAtMs <= nowMs) {
+    throw badRequest(
+      "end_at is already past: the task would never fire again. Pick a later end time, or delete the task.",
+    );
+  }
   // At save time, verify the (provider, modelId) pair names a configured model (same rules as reconciliation) so we never persist a broken file.
   // The pairing rule itself is enforced by parseScheduleFile above, which rejects half a reference.
   const refError = await validateScheduleModelRef(deps.projectConfigService, projectId, parsed.def);
