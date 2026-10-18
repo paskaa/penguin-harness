@@ -754,7 +754,16 @@ export class SessionService {
     // Trace activity from the index (one mtime-gated reconcile, then a pure DB read —
     // this used to walk the Agent's ENTIRE trace history on every agents-list request):
     // the date is the shard's date directory (local yyyy-mm-dd, core's writing convention).
-    await this.deps.traceIndex.reconcileAgent(projectId, agentId);
+    //
+    // Bounded wait: when the mtime gate opens (an active session writing), the reconcile
+    // re-diffs thousands of shards — seconds of work that races a session registration's
+    // row locks. The list must not stall behind it: after 300ms serve the current index;
+    // the reconcile keeps running in the background (TraceIndexService dedups concurrent
+    // runs) and the next poll serves its result.
+    await Promise.race([
+      this.deps.traceIndex.reconcileAgent(projectId, agentId),
+      new Promise<undefined>((resolve) => setTimeout(resolve, 300)),
+    ]);
     for (const f of this.deps.traceStore.listFilesByAgent(projectId, agentId)) {
       mark(f.date, f.sessionId);
     }
