@@ -610,10 +610,8 @@ export class Scheduler implements Scheduling {
     const userId = state.creatorUserId;
     if (userId) this.notify(userId, event);
   }
+
   async fireNow(
     projectId: string,
-    agentId: string,
-    name: string,
-  ): Promise<{ sessionId: string; queued: boolean }> {
-
 }
+
