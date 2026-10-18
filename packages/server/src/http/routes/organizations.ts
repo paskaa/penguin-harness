@@ -173,6 +173,14 @@ export interface OrgRouteDeps {
   serverSettingsRepo: Pick<Settings, "getCompanyMode">;
 }
 
+// Organizations-list response cache (SWR): the view builds per-org session maps over
+// every Agent (seconds of synchronous work), while the page is opened rarely. 15s
+// staleness + background refresh; the content does not vary by viewer (the member()
+// gate is binary), so the key is the Project alone.
+const ORG_LIST_TTL = 15000;
+const orgListCache = new Map<string, { at: number; body: OrganizationsResponse }>();
+const orgListInFlight = new Map<string, Promise<OrganizationsResponse>>();
+
 export function organizationRoutes(deps: OrgRouteDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
 
@@ -192,7 +200,31 @@ export function organizationRoutes(deps: OrgRouteDeps): Hono<AppEnv> {
   app.get("/", async (c) => {
     const projectId = requireValidId(c, "projectId");
     member(c, projectId);
-    const res: OrganizationsResponse = { organizations: await deps.orgService.list(projectId) };
+    const hit = orgListCache.get(projectId);
+    const refresh = (): Promise<OrganizationsResponse> => {
+      let p = orgListInFlight.get(projectId);
+      if (!p) {
+        p = deps.orgService
+          .list(projectId)
+          .then((organizations) => {
+            const body: OrganizationsResponse = { organizations };
+            if (orgListCache.size > 100) orgListCache.clear();
+            orgListCache.set(projectId, { at: Date.now(), body });
+            return body;
+          })
+          .finally(() => {
+            orgListInFlight.delete(projectId);
+          });
+        orgListInFlight.set(projectId, p);
+      }
+      return p;
+    };
+    if (hit) {
+      if (Date.now() - hit.at < ORG_LIST_TTL) return c.json(hit.body);
+      void refresh();
+      return c.json(hit.body);
+    }
+    const res = await refresh();
     return c.json(res);
   });
 
