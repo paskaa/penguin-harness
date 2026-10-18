@@ -712,7 +712,7 @@ export function sessionsBatchRoutes(deps: SessionsRouteDeps): Hono<AppEnv> {
 // status still flows through SSE. Keyed by the FULL request shape + userId (org
 // visibility differs per viewer); concurrent identical requests share one in-flight
 // build (the web's double-fetch); bounded size.
-const SESSIONS_LIST_TTL = 3000;
+const SESSIONS_LIST_TTL = 15000;
 const sessionsListCache = new Map<string, { at: number; body: unknown }>();
 const sessionsListInFlight = new Map<string, Promise<unknown>>();
 
