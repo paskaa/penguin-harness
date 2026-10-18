@@ -991,7 +991,15 @@ export class SessionService {
     const cacheKey = `${row.projectId}/${row.agentId}/${row.sessionId}`;
     const cached = this.latestTraceTtl.get(cacheKey);
     if (cached && Date.now() - cached.at < 3000) return cached.path;
-    await this.deps.traceIndex.reconcileAgent(row.projectId, row.agentId);
+    // Bounded wait — same rule as walkRows: an open mtime gate (an active session
+    // writing) turns this reconcile into a seconds-long full re-diff, and the session
+    // DETAIL paid it on every first open. If it does not settle in 300ms the quick
+    // scan below answers from the filesystem names alone; the reconcile finishes in
+    // the background for the next call.
+    await Promise.race([
+      this.deps.traceIndex.reconcileAgent(row.projectId, row.agentId),
+      new Promise<undefined>((resolve) => setTimeout(resolve, 300)),
+    ]);
     let files = this.deps.traceStore.listFilesBySession(row.projectId, row.agentId, row.sessionId);
     if (files.length === 0) {
       // Index miss with disk possibly ahead: try the deterministic direct lookup FIRST —
