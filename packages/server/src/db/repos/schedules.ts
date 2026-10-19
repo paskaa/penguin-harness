@@ -23,6 +23,12 @@ export interface ScheduleStateRow {
   firedOnce: boolean;
   missed: boolean;
   invalidReason: string | null;
+  /** Consecutive firing failures (session creation / send); a success resets it. */
+  failCount: number;
+  /** Auto-pause instant after repeated failures; null = firing normally. */
+  autoPausedAt: string | null;
+  /** Why the auto-pause tripped (the firing-failure code). */
+  autoPauseReason: string | null;
 }
 
 function mapRow(r: Record<string, unknown>): ScheduleStateRow {
@@ -38,6 +44,9 @@ function mapRow(r: Record<string, unknown>): ScheduleStateRow {
     firedOnce: Number(r.fired_once) === 1,
     missed: Number(r.missed) === 1,
     invalidReason: (r.invalid_reason as string | null) ?? null,
+    failCount: Number(r.fail_count ?? 0),
+    autoPausedAt: (r.auto_paused_at as string | null) ?? null,
+    autoPauseReason: (r.auto_pause_reason as string | null) ?? null,
   };
 }
 
@@ -103,7 +112,8 @@ export class SchedulesRepo implements Schedules {
         .prepare(
           `UPDATE schedule_state
              SET start_at_ms = ?, def_hash = ?, last_slot_ms = NULL, last_fired_at = NULL,
-                 fired_once = 0, missed = 0, invalid_reason = NULL
+                 fired_once = 0, missed = 0, invalid_reason = NULL,
+                 fail_count = 0, auto_paused_at = NULL, auto_pause_reason = NULL
            WHERE project_id = ? AND agent_id = ? AND name = ?`,
         )
         .run(args.startAtMs, args.defHash, args.projectId, args.agentId, args.name);
@@ -111,7 +121,8 @@ export class SchedulesRepo implements Schedules {
     } else if (existing.defHash !== args.defHash) {
       this.db
         .prepare(
-          `UPDATE schedule_state SET def_hash = ?, invalid_reason = NULL
+          `UPDATE schedule_state SET def_hash = ?, invalid_reason = NULL,
+             fail_count = 0, auto_paused_at = NULL, auto_pause_reason = NULL
            WHERE project_id = ? AND agent_id = ? AND name = ?`,
         )
         .run(args.defHash, args.projectId, args.agentId, args.name);
@@ -165,6 +176,52 @@ export class SchedulesRepo implements Schedules {
          WHERE project_id = ? AND agent_id = ? AND name = ?`,
       )
       .run(reason, projectId, agentId, name);
+  }
+
+  /** One more consecutive firing failure; answers the new count. */
+  noteFiringFailure(projectId: string, agentId: string, name: string): number {
+    this.db
+      .prepare(
+        `UPDATE schedule_state SET fail_count = fail_count + 1
+         WHERE project_id = ? AND agent_id = ? AND name = ?`,
+      )
+      .run(projectId, agentId, name);
+    const row = this.db
+      .prepare(
+        "SELECT fail_count FROM schedule_state WHERE project_id = ? AND agent_id = ? AND name = ?",
+      )
+      .get(projectId, agentId, name) as { fail_count: number } | undefined;
+    return row?.fail_count ?? 0;
+  }
+
+  /** A success resets the consecutive count (the pause itself needs an explicit resume). */
+  noteFiringSuccess(projectId: string, agentId: string, name: string): void {
+    this.db
+      .prepare(
+        `UPDATE schedule_state SET fail_count = 0
+         WHERE project_id = ? AND agent_id = ? AND name = ?`,
+      )
+      .run(projectId, agentId, name);
+  }
+
+  /** Stops the ticks after repeated failures; resume (or a file edit) clears it. */
+  autoPause(projectId: string, agentId: string, name: string, reason: string, at: string): void {
+    this.db
+      .prepare(
+        `UPDATE schedule_state SET auto_paused_at = ?, auto_pause_reason = ?
+         WHERE project_id = ? AND agent_id = ? AND name = ?`,
+      )
+      .run(at, reason, projectId, agentId, name);
+  }
+
+  /** Lifts an auto-pause and forgets the count behind it. */
+  clearAutoPause(projectId: string, agentId: string, name: string): void {
+    this.db
+      .prepare(
+        `UPDATE schedule_state SET fail_count = 0, auto_paused_at = NULL, auto_pause_reason = NULL
+         WHERE project_id = ? AND agent_id = ? AND name = ?`,
+      )
+      .run(projectId, agentId, name);
   }
 
   /** Deleting the file removes the task: clears its runtime state. */

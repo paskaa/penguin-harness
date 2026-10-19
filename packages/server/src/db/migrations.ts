@@ -708,6 +708,21 @@ export const MIGRATIONS: readonly Migration[] = [
       db.exec("DROP TABLE IF EXISTS model_health");
     },
   },
+  {
+    version: 20,
+    name: "schedule-auto-pause",
+    // Three nullable-with-default columns on the schedule runtime state: the consecutive
+    // firing-failure count and the auto-pause stamp. Existing rows read as never-failed
+    // and firing, so nothing changes behavior until the scheduler starts counting.
+    swapSafe: true,
+    up(db) {
+      ensureColumn(db, "schedule_state", "fail_count", "INTEGER NOT NULL DEFAULT 0");
+      ensureColumn(db, "schedule_state", "auto_paused_at", "TEXT");
+      ensureColumn(db, "schedule_state", "auto_pause_reason", "TEXT");
+    },
+    // Keep the learned counts on rollback; older builds ignore the columns.
+    down() {},
+  },
 ];
 
 /** The highest version this build knows how to reach. */

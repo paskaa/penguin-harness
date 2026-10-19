@@ -3628,6 +3628,15 @@ export type ScheduleServerEvent =
       name: string;
       sessionId: string;
     }
+  /** Repeated firing failures paused the ticks; resume (or a file edit) clears it. */
+  | {
+      type: "schedule_auto_paused";
+      projectId: string;
+      agentId: string;
+      name: string;
+      reason: string;
+      failures: number;
+    }
   /** A workbench of the Agent was (re)loaded — its folder changed, a reload was requested, or a version was restored. */
   | { type: "workbench_updated"; projectId: string; agentId: string; workbench: WorkbenchInfo }
   /** A workbench's folder is gone — removed from the Web App or deleted on disk. */
@@ -4401,7 +4410,7 @@ export interface UsageResponse {
 // ---------------------------------------------------------------------------
 
 /** Display-facing schedule status: the file's `enabled` only expresses intent; the rest is derived from runtime state. */
-export type ScheduleStatus = "active" | "disabled" | "expired" | "done" | "missed" | "invalid";
+export type ScheduleStatus = "active" | "disabled" | "expired" | "done" | "missed" | "invalid" | "auto_paused";
 
 export interface ScheduleItem {
   /** Filename (without .toml) is the identifier. */
@@ -4422,6 +4431,8 @@ export interface ScheduleItem {
   provider?: string;
   status: ScheduleStatus;
   invalidReason?: string;
+  /** Why the ticks auto-paused (the firing-failure code); present exactly while paused. */
+  autoPauseReason?: string;
   /** Next scheduled fire time (ISO 8601); unset when done/missed/invalid/disabled. */
   nextFireAt?: string;
   /** Most recent actual fire time (ISO 8601). */

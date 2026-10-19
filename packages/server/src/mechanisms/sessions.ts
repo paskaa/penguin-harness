@@ -113,6 +113,20 @@ export abstract class Schedules {
   ): void;
   abstract markMissed(projectId: string, agentId: string, name: string): void;
   abstract markInvalid(projectId: string, agentId: string, name: string, reason: string): void;
+  /** One more consecutive firing failure; answers the new count. */
+  abstract noteFiringFailure(projectId: string, agentId: string, name: string): number;
+  /** A success resets the consecutive count (the pause itself needs an explicit resume). */
+  abstract noteFiringSuccess(projectId: string, agentId: string, name: string): void;
+  /** Stops the ticks after repeated failures; resume (or a file edit) clears it. */
+  abstract autoPause(
+    projectId: string,
+    agentId: string,
+    name: string,
+    reason: string,
+    at: string,
+  ): void;
+  /** Lifts an auto-pause and forgets the count behind it. */
+  abstract clearAutoPause(projectId: string, agentId: string, name: string): void;
   abstract delete(projectId: string, agentId: string, name: string): void;
   abstract deleteMissing(projectId: string, agentId: string, presentNames: string[]): string[];
   abstract deleteByAgent(projectId: string, agentId: string): void;
@@ -147,4 +161,13 @@ export abstract class Scheduling {
     agentId: string,
     name: string,
   ): Promise<{ sessionId: string; queued: boolean }>;
+  /**
+   * Lifts an auto-pause (and forgets the count behind it). Answers whether anything was
+   * paused; unknown names throw schedule_not_found like fireNow.
+   */
+  abstract resumeAutoPaused(
+    projectId: string,
+    agentId: string,
+    name: string,
+  ): Promise<{ resumed: boolean }>;
 }

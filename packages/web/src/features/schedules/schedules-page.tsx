@@ -64,19 +64,20 @@ import {
 } from "./schedule-category";
 import type { SchedulePageFilters, ScheduleType } from "./schedule-category";
 import { describeInstant, describePeriod } from "./schedule-describe";
-import { SCHEDULE_FILTERS } from "./schedule-panel-state";
+import { SCHEDULE_FILTERS, autoPauseReasonOf } from "./schedule-panel-state";
 import { ScheduleDetailDialog } from "./schedule-detail-dialog";
 import { ScheduleFormModal } from "./schedule-form-modal";
 import { refreshSchedules, useProjectSchedules } from "./schedule-store";
 
 /** Display status → badge, the same mapping the settings tab's table uses. */
-const STATUS_BADGE: Record<ScheduleStatus, BadgeStyle> = {
+const STATUS_BADGE: Record<ScheduleStatus | "auto_paused", BadgeStyle> = {
   active: { tone: "success" },
   disabled: { tone: "neutral" },
   expired: { tone: "attention" },
   done: { tone: "neutral", variant: "solid" },
   missed: { tone: "attention" },
   invalid: { tone: "danger" },
+  auto_paused: { tone: "attention" },
 };
 
 /** One agent's tasks, in the listing's own order (agents by id, a task's file order within). */
@@ -252,7 +253,10 @@ export function SchedulesPage() {
                       </button>
                     </TableCell>
                     <TableCell nowrap>
-                      <span data-tooltip={item.invalidReason} data-tooltip-extra>
+                      <span
+                        data-tooltip={item.invalidReason ?? autoPauseReasonOf(item)}
+                        data-tooltip-extra
+                      >
                         <Badge {...STATUS_BADGE[item.status]}>
                           {S.schedule.statusNames[item.status] ?? item.status}
                         </Badge>

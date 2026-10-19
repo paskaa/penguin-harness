@@ -119,13 +119,14 @@ interface PendingFire {
   sessionId: string;
 }
 
-/** Displayed status precedence: invalid > done/missed (one-shot) > expired > enabled flag. */
+/** Displayed status precedence: invalid > auto-paused > done/missed (one-shot) > expired > enabled flag. */
 export function scheduleStatus(
   def: ScheduleDefinition,
   state: ScheduleStateRow,
   nowMs: number,
 ): ScheduleStatus {
   if (state.invalidReason !== null) return "invalid";
+  if (state.autoPausedAt !== null) return "auto_paused";
   if (def.periodMs === undefined && state.firedOnce) return "done";
   if (def.periodMs === undefined && state.missed) return "missed";
   if (def.endAtMs !== undefined && nowMs > def.endAtMs) return "expired";
@@ -136,6 +137,9 @@ export function scheduleStatus(
 export function isSettledStatus(status: ScheduleStatus): boolean {
   return status === "done" || status === "missed" || status === "expired";
 }
+
+/** Consecutive firing failures that stop the ticks until a resume (or a file edit). */
+export const SCHEDULE_AUTOPAUSE_THRESHOLD = 3;
 
 /** In-memory view of a registered task (definition + run state + queued flag). */
 export interface ScheduleEntryView {
@@ -469,7 +473,7 @@ export class Scheduler implements Scheduling {
     def: ScheduleDefinition,
     state: ScheduleStateRow,
   ): Promise<void> {
-    if (!def.enabled || state.invalidReason !== null) return;
+    if (!def.enabled || state.invalidReason !== null || state.autoPausedAt !== null) return;
     if (def.periodMs === undefined && (state.firedOnce || state.missed)) return;
     const nowMs = this.now();
     const slot = latestSlotAt(def, nowMs);
@@ -478,6 +482,33 @@ export class Scheduler implements Scheduling {
     // Consume this slot: never retry the same slot whether the send then succeeds, queues, or fails (the twin rule of no-backfill).
     this.repo.markSlot(projectId, agentId, def.name, slot);
     await this.dispatch(projectId, agentId, def, state);
+  }
+
+  /**
+   * One firing failed to leave the station (session creation or send — the run itself is
+   * never judged here). At the threshold the ticks stop until a resume, and the creator
+   * hears why; below it the next slot still fires as planned.
+   */
+  private noteFiringFailure(
+    projectId: string,
+    agentId: string,
+    def: ScheduleDefinition,
+    state: ScheduleStateRow,
+    code: string,
+  ): void {
+    if (state.autoPausedAt !== null) return;
+    const count = this.repo.noteFiringFailure(projectId, agentId, def.name);
+    if (count < SCHEDULE_AUTOPAUSE_THRESHOLD) return;
+    const at = new Date(this.now()).toISOString();
+    this.repo.autoPause(projectId, agentId, def.name, code, at);
+    this.notifyFor(state, {
+      type: "schedule_auto_paused",
+      projectId,
+      agentId,
+      name: def.name,
+      reason: code,
+      failures: count,
+    });
   }
 
   /** Send one fire: queue if the bound Session is busy; in new-Session mode, create and send immediately. */
@@ -539,6 +570,7 @@ export class Scheduler implements Scheduling {
         code: "schedule_create_session_failed",
         ctx: { projectId, agentId },
       });
+      this.noteFiringFailure(projectId, agentId, def, state, "schedule_create_session_failed");
     }
   }
 
@@ -564,9 +596,11 @@ export class Scheduler implements Scheduling {
         code: "schedule_send_failed",
         ctx: { projectId, agentId, sessionId },
       });
+      this.noteFiringFailure(projectId, agentId, def, state, "schedule_send_failed");
       return;
     }
     this.repo.markFired(projectId, agentId, def.name, firedAt, def.periodMs === undefined);
+    this.repo.noteFiringSuccess(projectId, agentId, def.name);
     // A one-shot is settled the moment it fires (as is a periodic task whose last fire went out
     // after end_at): archive it before the event, or the refetch the event triggers would still
     // list it as done.
@@ -580,11 +614,11 @@ export class Scheduler implements Scheduling {
     });
   }
 
-  /** Drain the queue: send once the target Session is idle; drop if the task is disabled/deleted/invalid. */
+  /** Drain the queue: send once the target Session is idle; drop if the task is disabled/deleted/invalid/paused. */
   private async drainQueue(): Promise<void> {
     for (const [key, fire] of [...this.pending]) {
       const state = this.repo.find(fire.projectId, fire.agentId, fire.name);
-      if (!state || state.invalidReason !== null) {
+      if (!state || state.invalidReason !== null || state.autoPausedAt !== null) {
         this.pending.delete(key);
         continue;
       }
@@ -669,5 +703,31 @@ export class Scheduler implements Scheduling {
       );
     }
     return fired;
+  }
+
+  /**
+   * Lifts an auto-pause (and forgets the count behind it). Answers whether anything was
+   * paused; unknown names throw like fireNow. A file edit clears the same state through
+   * registerOrSync, so this is the no-edit way back.
+   */
+  async resumeAutoPaused(
+    projectId: string,
+    agentId: string,
+    name: string,
+  ): Promise<{ resumed: boolean }> {
+    const { entries, invalid } = await this.listAgent(projectId, agentId);
+    const entry = entries.find((e) => e.def.name === name);
+    if (!entry) {
+      const bad = invalid.find((i) => i.name === name);
+      if (bad)
+        throw new ScheduleFireError(
+          "schedule_invalid",
+          `Schedule ${name} is invalid and cannot resume: ${bad.error}`,
+        );
+      throw new ScheduleFireError("schedule_not_found", `Schedule does not exist: ${name}`);
+    }
+    if (entry.state.autoPausedAt === null) return { resumed: false };
+    this.repo.clearAutoPause(projectId, agentId, name);
+    return { resumed: true };
   }
 }

@@ -2577,6 +2577,7 @@ export const en: Strings = {
       done: "Done",
       missed: "Missed",
       invalid: "Invalid",
+      auto_paused: "Auto-paused",
     } as Record<string, string>,
     queued: "Queued",
     once: "One-off",

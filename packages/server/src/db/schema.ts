@@ -182,6 +182,9 @@ CREATE TABLE IF NOT EXISTS schedule_state (    -- schedule runtime state (files 
   fired_once      INTEGER NOT NULL DEFAULT 0,  -- one-shot task has fired
   missed          INTEGER NOT NULL DEFAULT 0,  -- one-shot task was missed (flagged by startup/registration reconciliation; not backfilled)
   invalid_reason  TEXT,                        -- invalidation reason (e.g. the bound Session was deleted); NULL=healthy
+  fail_count      INTEGER NOT NULL DEFAULT 0,  -- consecutive firing failures (session creation / send); a success resets it
+  auto_paused_at  TEXT,                        -- auto-pause instant after repeated failures; NULL=firing normally
+  auto_pause_reason TEXT,                      -- why the auto-pause tripped (the firing-failure code)
   PRIMARY KEY (project_id, agent_id, name)
 );
 CREATE TABLE IF NOT EXISTS messaging_bindings ( -- Session ↔ messaging-channel bot bindings (runtime/messaging/ holds the long connections)

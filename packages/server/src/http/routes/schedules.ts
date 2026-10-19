@@ -98,13 +98,13 @@ function parseUpsertBody(body: Record<string, unknown>): {
   };
 }
 
-/** Next scheduled fire time: none when disabled/invalid/done/missed; an undigested due slot counts as-is. */
+/** Next scheduled fire time: none when disabled/invalid/paused/done/missed; an undigested due slot counts as-is. */
 function nextFireAt(
   def: ScheduleDefinition,
   state: ScheduleStateRow,
   nowMs: number,
 ): string | undefined {
-  if (!def.enabled || state.invalidReason !== null) return undefined;
+  if (!def.enabled || state.invalidReason !== null || state.autoPausedAt !== null) return undefined;
   if (def.periodMs === undefined && (state.firedOnce || state.missed)) return undefined;
   const due = latestSlotAt(def, nowMs);
   if (
@@ -138,6 +138,9 @@ function toItem(
     ...(def.provider !== undefined ? { provider: def.provider } : {}),
     status: scheduleStatus(def, state, nowMs),
     ...(state.invalidReason !== null ? { invalidReason: state.invalidReason } : {}),
+    ...(state.autoPausedAt !== null && state.autoPauseReason !== null
+      ? { autoPauseReason: state.autoPauseReason }
+      : {}),
     ...(next !== undefined ? { nextFireAt: next } : {}),
     ...(state.lastFiredAt !== null ? { lastFiredAt: state.lastFiredAt } : {}),
     queued,
@@ -229,6 +232,26 @@ export function scheduleRoutes(deps: SchedulesRouteDeps): Hono<AppEnv> {
       throw new HttpError(404, "schedule_not_found", `Schedule does not exist: ${name}`);
     deps.scheduler.dropEntry(projectId, agentId, name);
     return c.body(null, 204);
+  });
+
+  // Lift an auto-pause (owner): the ticks run again and the count behind the pause is
+  // forgotten. Answers whether anything was paused; a file edit clears the same state,
+  // so this is the no-edit way back.
+  app.post("/:name/resume", async (c) => {
+    const projectId = requireValidId(c, "projectId");
+    const agentId = requireValidId(c, "agentId");
+    deps.access.requireProjectOwner(c.var.user.userId, projectId);
+    await deps.agentConfigService.requireExists(projectId, agentId);
+    const name = requireScheduleName(c.req.param("name"));
+    try {
+      return c.json(await deps.scheduler.resumeAutoPaused(projectId, agentId, name));
+    } catch (err) {
+      if (err instanceof ScheduleFireError) {
+        if (err.code === "schedule_not_found") throw new HttpError(404, err.code, err.message);
+        throw new HttpError(400, err.code, err.message);
+      }
+      throw err;
+    }
   });
 
   return app;

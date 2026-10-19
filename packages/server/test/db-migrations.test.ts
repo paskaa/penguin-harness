@@ -634,6 +634,7 @@ describe("migration 8 → current: model-promotions", () => {
         "agent-api-session-settings",
         "agent-api-concurrency",
         "model-health",
+        "schedule-auto-pause",
       ]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       expect(promotionsTableExists()).toEqual({ "1": 1 });
@@ -663,6 +664,7 @@ describe("migration 8 → current: model-promotions", () => {
         "agent-api-session-settings",
         "agent-api-concurrency",
         "model-health",
+        "schedule-auto-pause",
       ]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
     } finally {
@@ -692,6 +694,7 @@ describe("migration 9 → current: model-provider-auth-tokens", () => {
         "agent-api-session-settings",
         "agent-api-concurrency",
         "model-health",
+        "schedule-auto-pause",
       ]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       expect(tableExists()).toEqual({ "1": 1 });
@@ -744,6 +747,7 @@ describe("migration 12 → current: browser-extensions", () => {
         "agent-api-session-settings",
         "agent-api-concurrency",
         "model-health",
+        "schedule-auto-pause",
       ]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       db.exec("PRAGMA foreign_keys = ON");
@@ -809,6 +813,7 @@ describe("migration 13 → current: agent-api", () => {
         "agent-api-session-settings",
         "agent-api-concurrency",
         "model-health",
+        "schedule-auto-pause",
       ]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       const enable = () =>
@@ -899,6 +904,7 @@ describe("migration 14 → current: messaging-conversations", () => {
         "agent-api-session-settings",
         "agent-api-concurrency",
         "model-health",
+        "schedule-auto-pause",
       ]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       const put = () =>
@@ -945,6 +951,7 @@ describe("migration 15 → current: sessions-kept-at", () => {
         "agent-api-session-settings",
         "agent-api-concurrency",
         "model-health",
+        "schedule-auto-pause",
       ]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       expect(db.prepare("SELECT session_id, kept_at FROM sessions").all()).toEqual([
@@ -1283,6 +1290,9 @@ function open18(): DatabaseSync {
   const db = new sqlite.DatabaseSync(":memory:");
   db.exec(SCHEMA_SQL);
   dropModelHealth(db);
+  db.exec("ALTER TABLE schedule_state DROP COLUMN fail_count");
+  db.exec("ALTER TABLE schedule_state DROP COLUMN auto_paused_at");
+  db.exec("ALTER TABLE schedule_state DROP COLUMN auto_pause_reason");
   db.exec("PRAGMA user_version = 18");
   return db;
 }
@@ -1297,12 +1307,12 @@ describe("migration 18 → current: model-health", () => {
     const db = open18();
     try {
       expect(healthTableExists(db)).toBeUndefined();
-      expect(migrate(db).applied).toEqual(["model-health"]);
+      expect(migrate(db).applied).toEqual(["model-health", "schedule-auto-pause"]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       expect(healthTableExists(db)).toEqual({ ok: 1 });
       rollbackTo(db, 18);
       expect(healthTableExists(db)).toBeUndefined();
-      expect(migrate(db).applied).toEqual(["model-health"]);
+      expect(migrate(db).applied).toEqual(["model-health", "schedule-auto-pause"]);
       expect(healthTableExists(db)).toEqual({ ok: 1 });
     } finally {
       db.close();
@@ -1312,7 +1322,51 @@ describe("migration 18 → current: model-health", () => {
   it("is safe to create while a pushed platform boots", () => {
     const db = open18();
     try {
-      expect(migrate(db, { swapPath: true }).applied).toEqual(["model-health"]);
+      expect(migrate(db, { swapPath: true }).applied).toEqual(["model-health", "schedule-auto-pause"]);
+      expect(schemaVersion(db)).toBe(LATEST_VERSION);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+/** A database stamped at migration 19: everything before the schedule auto-pause columns. */
+function open19(): DatabaseSync {
+  const db = new sqlite.DatabaseSync(":memory:");
+  db.exec(SCHEMA_SQL);
+  db.exec("ALTER TABLE schedule_state DROP COLUMN fail_count");
+  db.exec("ALTER TABLE schedule_state DROP COLUMN auto_paused_at");
+  db.exec("ALTER TABLE schedule_state DROP COLUMN auto_pause_reason");
+  db.exec("PRAGMA user_version = 19");
+  return db;
+}
+
+describe("migration 19 → current: schedule-auto-pause", () => {
+  const columns = (db: DatabaseSync): string[] =>
+    (
+      db.prepare("SELECT name FROM pragma_table_info('schedule_state')").all() as Array<{
+        name: string;
+      }>
+    ).map((c) => c.name);
+
+  it("adds the failure count and pause stamp, settled rows reading as never-paused", () => {
+    const db = open19();
+    try {
+      expect(columns(db)).not.toContain("fail_count");
+      expect(migrate(db).applied).toEqual(["schedule-auto-pause"]);
+      expect(schemaVersion(db)).toBe(LATEST_VERSION);
+      expect(columns(db)).toEqual(expect.arrayContaining(["fail_count", "auto_paused_at", "auto_pause_reason"]));
+      // A second pass is a no-op: the declarative track may already have applied it (ADOPTION).
+      expect(migrate(db).applied).toEqual([]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("is safe to add while a pushed platform boots", () => {
+    const db = open19();
+    try {
+      expect(migrate(db, { swapPath: true }).applied).toEqual(["schedule-auto-pause"]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
     } finally {
       db.close();

@@ -338,4 +338,25 @@ describe("schedules api", () => {
     expect(item.status).toBe("invalid");
     expect(item.invalidReason).toBe("session_missing");
   });
+
+  it("POST /:name/resume is owner-only; unknown names 404; unpaused answers resumed:false", async () => {
+    expect(
+      (
+        await owner.post(base, {
+          name: "steady",
+          prompt: "p",
+          enabled: true,
+          startAt: FUTURE,
+          period: "30m",
+        })
+      ).status,
+    ).toBe(201);
+    expect((await member.post(`${base}/steady/resume`)).status).toBe(403);
+    const res = await owner.post(`${base}/nope/resume`);
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
+      "schedule_not_found",
+    );
+    expect(await (await owner.post(`${base}/steady/resume`)).json()).toEqual({ resumed: false });
+  });
 });

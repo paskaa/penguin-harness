@@ -44,6 +44,9 @@ describe("scheduler", () => {
   let busy: Set<string>;
   let started: Array<{ sessionId: string; text: string }>;
   let created: Array<Parameters<ScheduleSessionCreator["createSession"]>[0]>;
+  /** Flip to make session creation / sends fail (auto-pause tests); off everywhere else. */
+  let failCreate: boolean;
+  let failSend: boolean;
   let events: Array<{ userId: string; event: ScheduleServerEvent }>;
   let errors: ErrorRecordArgs[];
   let scheduler: Scheduler;
@@ -78,6 +81,8 @@ describe("scheduler", () => {
     created = [];
     events = [];
     errors = [];
+    failCreate = false;
+    failSend = false;
     let seq = 0;
     scheduler = wire(Scheduler, {
       paths: { root },
@@ -87,12 +92,14 @@ describe("scheduler", () => {
       runner: {
         statusOf: (id: string) => (busy.has(id) ? "running" : "idle"),
         startTask: async (sessionId: string, input: OmniMessage[]) => {
+          if (failSend) throw new Error("send boom");
           started.push({ sessionId, text: JSON.stringify(input[0]?.payload ?? "") });
           return { sessionId, queued: false };
         },
       } satisfies ScheduleTaskRunner,
       sessionCreator: {
         createSession: async (args: Parameters<ScheduleSessionCreator["createSession"]>[0]) => {
+          if (failCreate) throw new Error("create boom");
           created.push(args);
           const sessionId = `session-new-${++seq}`;
           insertSession(sessionId);
@@ -580,5 +587,97 @@ describe("scheduler", () => {
     expect(errors.some((e) => e.code === "schedule_session_missing")).toBe(true);
     // Marked invalid, a second attempt reports invalid rather than re-checking.
     expect((await fireError("lost")).code).toBe("schedule_invalid");
+  });
+
+  it("three consecutive creation failures auto-pause the ticks and notify; resume restarts them", async () => {
+    await writeFile("flaky", [
+      `prompt = "flaky"`,
+      `enabled = true`,
+      `start_at = "${iso(T0)}"`,
+      `period = "5m"`,
+    ]);
+    failCreate = true;
+    nowMs = T0;
+    await scheduler.tickOnce(); // Registration.
+    for (const mins of [5, 10, 15]) {
+      nowMs = T0 + mins * MIN;
+      await scheduler.tickOnce();
+    }
+    expect(repo.find(P, A, "flaky")?.failCount).toBe(3);
+    const paused = repo.find(P, A, "flaky");
+    expect(paused?.autoPausedAt).not.toBeNull();
+    expect(paused?.autoPauseReason).toBe("schedule_create_session_failed");
+    expect(events.filter((e) => e.event.type === "schedule_auto_paused")).toHaveLength(1);
+    // Paused: further slots neither fire nor count.
+    nowMs = T0 + 20 * MIN;
+    await scheduler.tickOnce();
+    expect(repo.find(P, A, "flaky")?.failCount).toBe(3);
+    expect(errors.filter((e) => e.code === "schedule_create_session_failed")).toHaveLength(3);
+    // Resume clears; the next slot fires into a healthy creator.
+    failCreate = false;
+    expect(await scheduler.resumeAutoPaused(P, A, "flaky")).toEqual({ resumed: true });
+    expect(await scheduler.resumeAutoPaused(P, A, "flaky")).toEqual({ resumed: false });
+    expect(repo.find(P, A, "flaky")?.autoPausedAt).toBeNull();
+    nowMs = T0 + 25 * MIN;
+    await scheduler.tickOnce();
+    expect(started).toHaveLength(1);
+    expect(repo.find(P, A, "flaky")?.failCount).toBe(0);
+  });
+
+  it("a success between failures resets the count, and send failures count the same", async () => {
+    await writeFile("wobbly", [
+      `prompt = "wobbly"`,
+      `enabled = true`,
+      `start_at = "${iso(T0)}"`,
+      `period = "5m"`,
+    ]);
+    failCreate = true;
+    nowMs = T0;
+    await scheduler.tickOnce();
+    nowMs = T0 + 5 * MIN;
+    await scheduler.tickOnce();
+    nowMs = T0 + 10 * MIN;
+    await scheduler.tickOnce();
+    expect(repo.find(P, A, "wobbly")?.failCount).toBe(2);
+    failCreate = false;
+    nowMs = T0 + 15 * MIN;
+    await scheduler.tickOnce();
+    expect(repo.find(P, A, "wobbly")?.failCount).toBe(0);
+    expect(repo.find(P, A, "wobbly")?.autoPausedAt).toBeNull();
+    // Send failures trip the same counter and the same pause.
+    failSend = true;
+    for (const mins of [20, 25, 30]) {
+      nowMs = T0 + mins * MIN;
+      await scheduler.tickOnce();
+    }
+    expect(repo.find(P, A, "wobbly")?.autoPauseReason).toBe("schedule_send_failed");
+  });
+
+  it("resumeAutoPaused throws schedule_not_found for an unknown name", async () => {
+    await expect(scheduler.resumeAutoPaused(P, A, "ghost")).rejects.toMatchObject({
+      code: "schedule_not_found",
+    });
+  });
+
+  it("scheduleStatus ranks auto-paused above active and below invalid", async () => {
+    const { scheduleStatus } = await import("../src/runtime/scheduler.js");
+    const def = { enabled: true } as unknown as Parameters<typeof scheduleStatus>[0];
+    const paused = { invalidReason: null, autoPausedAt: "2026-10-19T00:00:00.000Z" };
+    const plain = { invalidReason: null, autoPausedAt: null };
+    expect(
+      scheduleStatus(def, paused as unknown as Parameters<typeof scheduleStatus>[1], T0),
+    ).toBe("auto_paused");
+    expect(
+      scheduleStatus(def, plain as unknown as Parameters<typeof scheduleStatus>[1], T0),
+    ).toBe("active");
+    expect(
+      scheduleStatus(
+        def,
+        { invalidReason: "x", autoPausedAt: "2026-10-19T00:00:00.000Z" } as unknown as Parameters<
+          typeof scheduleStatus
+        >[1],
+        T0,
+      ),
+    ).toBe("invalid");
   });
 });
