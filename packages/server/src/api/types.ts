@@ -6506,9 +6506,9 @@ export interface OrgTicketCreateRequest {
   /** The whole Markdown body instead of goal + acceptanceCriteria (the frontmatter is still generated). */
   body?: string;
   /**
-   * The responsible principal: an employee's `agent:<id>` (or bare Agent id) or a member's
-   * `user:<id>`. Default = the caller — the session's employee inside a desk or ticket
-   * session, else the token's or cookie's user.
+   * The responsible principal: an employee's `agent:<id>` (or bare Agent id), a member's
+   * `user:<id>`, or a squad's `squad:<id>` (wakes the squad leader). Default = the caller —
+   * the session's employee inside a desk or ticket session, else the token's or cookie's user.
    */
   owner?: string;
   parent?: string;
@@ -6534,6 +6534,43 @@ export interface OrgTicketMoveRequest {
   status: OrgTicketStatus;
   /** Required when moving into rejected; recorded under Result. */
   reason?: string;
+}
+
+/** One squad: a leader agent that routes, members that do. */
+export interface OrgSquad {
+  id: string;
+  name: string;
+  /** `agent:<id>` of an employee; always a member too. */
+  leader: string;
+  /** `agent:<id>` / `user:<id>` principals. */
+  members: string[];
+  /** member principal → what they suit; context for the leader only. */
+  roles: Record<string, string>;
+  /** Routing rules the leader alone reads. */
+  instructions: string;
+  archived: boolean;
+}
+
+export interface OrgSquadCreateRequest {
+  /** Organization-unique semantic id. */
+  id: string;
+  name: string;
+  /** `agent:<id>` (or bare Agent id) of an employee; joins the members automatically. */
+  leader: string;
+  members?: string[];
+  roles?: Record<string, string>;
+  instructions?: string;
+}
+
+export interface OrgSquadUpdateRequest {
+  name?: string;
+  /** A new leader joins the members automatically; the current leader cannot be removed directly — designate another leader first. */
+  leader?: string;
+  /** Whole-list replacement; must still include the leader in force. */
+  members?: string[];
+  /** Whole-map replacement; every key must name a member in force. */
+  roles?: Record<string, string>;
+  instructions?: string;
 }
 
 export interface OrgTicketBlockRequest {
@@ -6639,6 +6676,8 @@ export type CompanyServerEvent =
     }
   /** A ticket's status, owner, blocked state or contributing sessions changed. */
   | { type: "org_ticket"; projectId: string; orgId: string; ticketId: string; change: string }
+  /** A squad was created, updated or archived. */
+  | { type: "org_squad"; projectId: string; orgId: string; squadId: string; change: string }
   /** Budget warning, pause or resume for an employee. */
   | {
       type: "org_budget";

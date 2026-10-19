@@ -31,6 +31,9 @@ import type {
   OrgHireRequest,
   OrgInbox,
   OrgSessionsResponse,
+  OrgSquad,
+  OrgSquadCreateRequest,
+  OrgSquadUpdateRequest,
   OrgTicketCreateRequest,
   OrgTicketDetail,
   OrgTicketHistoryAction,
@@ -70,7 +73,7 @@ import type { Settings } from "../../mechanisms/settings.js";
 import type { Errors, UsageQueries } from "../../mechanisms/observability.js";
 import { OrgStore } from "../../organization/store.js";
 import { badRequest } from "../../http/validate.js";
-import type { ChannelConfig, OrgConfig, OrgEmployee, TicketDoc } from "../../organization/files.js";
+import type { ChannelConfig, OrgConfig, OrgEmployee, SquadDoc, Squads, TicketDoc } from "../../organization/files.js";
 import {
   BUDGET_RATIO_MAX,
   DEFAULT_CEO_BUDGET,
@@ -103,6 +106,8 @@ import {
   agentPrincipal,
   parsePrincipal,
   principalAgentId,
+  principalSquadId,
+  squadPrincipal,
   userPrincipal,
 } from "../../organization/principal.js";
 import { isValidTimeZone, zonedDate, zonedDayRange } from "../../organization/zoned.js";
@@ -1489,10 +1494,19 @@ export class OrganizationService {
    * `owner`: the one principal responsible for the ticket. A bare Agent id or `agent:<id>`
    * has to be an employee and `user:<id>` a Project member — a ticket owned by somebody the
    * organization does not have is a ticket nobody can be notified about, and nobody can start
-   * a session for.
+   * a session for. A `squad:<id>` names a live squad instead, and wakes its leader (see the
+   * assignment hooks in `updateTicket`/`moveTicket`).
    */
-  private requireOwner(org: LoadedOrg, raw: string): string {
+  private async requireOwner(org: LoadedOrg, raw: string): Promise<string> {
     const value = raw.trim();
+    const squadId = principalSquadId(value);
+    if (squadId !== null) {
+      const squads = await this.readSquadsOrThrow(org);
+      const squad = squads[squadId];
+      if (squad === undefined) throw badRequest(`unknown squad of ${org.orgId}: ${squadId}`);
+      if (squad.archived) throw badRequest(`squad is archived: ${squadId}`);
+      return squadPrincipal(squadId);
+    }
     const parsed = parsePrincipal(value);
     if (parsed === null && org.byId.has(value)) return agentPrincipal(value);
     if (parsed?.kind === "agent" && org.byId.has(parsed.id)) return agentPrincipal(parsed.id);
@@ -1627,7 +1641,7 @@ export class OrganizationService {
       if (title === "") throw badRequest("title must not be empty.");
       const by = this.actorPrincipal(org, actor);
       const owner =
-        req.owner !== undefined && req.owner.trim() !== "" ? this.requireOwner(org, req.owner) : by;
+        req.owner !== undefined && req.owner.trim() !== "" ? await this.requireOwner(org, req.owner) : by;
       // The model ask that names an untitled-in-English ticket runs under the organization's
       // lock: filing a ticket is rare, and a slug settled outside it could collide with one
       // filed meanwhile.
@@ -1688,6 +1702,222 @@ export class OrganizationService {
     return this.ticket(projectId, orgId, ticketId);
   }
 
+  // ---- squads ----
+
+  private async readSquadsOrThrow(org: LoadedOrg): Promise<Squads> {
+    const file = await this.deps.store.readSquads(org.dir);
+    if (!file.parsed.ok) {
+      throw new HttpError(409, "org_invalid", `Organization ${org.orgId} needs repair: squads.toml: ${file.parsed.error}`);
+    }
+    return file.parsed.value;
+  }
+
+  /** Squads of the organization, archived last (pickers filter them; history keeps pointing). */
+  async listSquads(projectId: string, orgId: string): Promise<OrgSquad[]> {
+    const org = await this.requireValidOrg(projectId, orgId);
+    const squads = await this.readSquadsOrThrow(org);
+    return Object.values(squads)
+      .sort((a, b) => Number(a.archived) - Number(b.archived) || a.id.localeCompare(b.id))
+      .map(squadToDto);
+  }
+
+  async squad(projectId: string, orgId: string, squadId: string): Promise<OrgSquad> {
+    const org = await this.requireValidOrg(projectId, orgId);
+    const squads = await this.readSquadsOrThrow(org);
+    const doc = squads[squadId];
+    if (doc === undefined) throw new HttpError(404, "squad_not_found", `Squad does not exist: ${squadId}`);
+    return squadToDto(doc);
+  }
+
+  async createSquad(
+    projectId: string,
+    orgId: string,
+    req: OrgSquadCreateRequest,
+  ): Promise<OrgSquad> {
+    return this.scheduler.withLock(projectId, orgId, async () => {
+      const org = await this.requireValidOrg(projectId, orgId);
+      const squads = await this.readSquadsOrThrow(org);
+      const id = req.id.trim();
+      if (!SEMANTIC_ID_PATTERN.test(id)) {
+        throw badRequest(`squad id must match ${SEMANTIC_ID_PATTERN}: ${req.id}`);
+      }
+      if (squads[id] !== undefined) throw badRequest(`squad already exists: ${id}`);
+      if (req.name.trim() === "") throw badRequest("squad name must not be empty.");
+      const leader = this.requireSquadLeader(org, req.leader);
+      const members = [leader];
+      for (const m of req.members ?? []) {
+        const p = this.requireSquadMember(org, m);
+        if (!members.includes(p)) members.push(p);
+      }
+      const doc: SquadDoc = {
+        id,
+        name: req.name.trim(),
+        leader,
+        members,
+        roles: this.requireSquadRoles(members, req.roles ?? {}),
+        instructions: (req.instructions ?? "").trim(),
+        archived: false,
+      };
+      squads[id] = doc;
+      await this.deps.store.writeSquads(org.dir, squads);
+      this.deps.notifyProject(projectId, { type: "org_squad", projectId, orgId, squadId: id, change: "created" });
+      return squadToDto(doc);
+    });
+  }
+
+  async updateSquad(
+    projectId: string,
+    orgId: string,
+    squadId: string,
+    req: OrgSquadUpdateRequest,
+  ): Promise<OrgSquad> {
+    return this.scheduler.withLock(projectId, orgId, async () => {
+      const org = await this.requireValidOrg(projectId, orgId);
+      const squads = await this.readSquadsOrThrow(org);
+      const doc = squads[squadId];
+      if (doc === undefined) throw new HttpError(404, "squad_not_found", `Squad does not exist: ${squadId}`);
+      if (doc.archived) throw badRequest(`squad is archived: ${squadId}`);
+      if (req.name !== undefined) {
+        if (req.name.trim() === "") throw badRequest("squad name must not be empty.");
+        doc.name = req.name.trim();
+      }
+      if (req.leader !== undefined) doc.leader = this.requireSquadLeader(org, req.leader);
+      if (req.members !== undefined) {
+        const members = req.members.map((m) => this.requireSquadMember(org, m));
+        if (!members.includes(doc.leader)) {
+          throw badRequest("the leader cannot be removed directly — designate another leader first.");
+        }
+        doc.members = [...new Set(members)];
+      } else if (!doc.members.includes(doc.leader)) {
+        // A new leader joins automatically, even when the member list was untouched.
+        doc.members = [...doc.members, doc.leader];
+      }
+      if (req.roles !== undefined) doc.roles = this.requireSquadRoles(doc.members, req.roles);
+      else {
+        // Roles for departed members leave with them.
+        for (const key of Object.keys(doc.roles)) {
+          if (!doc.members.includes(key)) delete doc.roles[key];
+        }
+      }
+      if (req.instructions !== undefined) doc.instructions = req.instructions.trim();
+      await this.deps.store.writeSquads(org.dir, squads);
+      this.deps.notifyProject(projectId, { type: "org_squad", projectId, orgId, squadId, change: "updated" });
+      return squadToDto(doc);
+    });
+  }
+
+  /**
+   * Archives a squad, irreversibly: it leaves every picker, and the tickets it still owns
+   * transfer to the former leader (each with its own `assigned` history entry, so the move
+   * reads as what it was). Archiving twice is a no-op returning the squad as it stands.
+   */
+  async archiveSquad(projectId: string, orgId: string, squadId: string, actor: Actor): Promise<OrgSquad> {
+    return this.scheduler.withLock(projectId, orgId, async () => {
+      const org = await this.requireValidOrg(projectId, orgId);
+      const squads = await this.readSquadsOrThrow(org);
+      const doc = squads[squadId];
+      if (doc === undefined) throw new HttpError(404, "squad_not_found", `Squad does not exist: ${squadId}`);
+      if (!doc.archived) {
+        doc.archived = true;
+        await this.deps.store.writeSquads(org.dir, squads);
+        const by = this.actorPrincipal(org, actor);
+        for (const f of await this.deps.store.listTickets(org.dir)) {
+          if (!f.parsed.ok || f.parsed.value.owner !== squadPrincipal(squadId)) continue;
+          const d = f.parsed.value;
+          d.owner = doc.leader;
+          this.recordHistory(d, by, "assigned", `${doc.leader} (squad ${squadId} archived)`);
+          await this.deps.store.writeTicket(org.dir, f.ticketId, f.column, d);
+          this.deps.notifyProject(projectId, { type: "org_ticket", projectId, orgId, ticketId: f.ticketId, change: "updated" });
+        }
+        this.deps.notifyProject(projectId, { type: "org_squad", projectId, orgId, squadId, change: "archived" });
+      }
+      return squadToDto(doc);
+    });
+  }
+
+  /** A squad's leader: an `agent:<id>` (or bare id) naming an employee. */
+  private requireSquadLeader(org: LoadedOrg, raw: string): string {
+    const value = raw.trim();
+    const parsed = parsePrincipal(value);
+    const id = parsed?.kind === "agent" ? parsed.id : org.byId.has(value) ? value : null;
+    if (id === null || !org.byId.has(id)) {
+      throw badRequest(`squad leader must be an employee of ${org.orgId} (an Agent id or agent:<id>): ${raw}`);
+    }
+    return agentPrincipal(id);
+  }
+
+  /** A squad member: an employee's `agent:<id>` (or bare id) or a Project member's `user:<id>`. */
+  private requireSquadMember(org: LoadedOrg, raw: string): string {
+    const value = raw.trim();
+    const parsed = parsePrincipal(value);
+    if (parsed === null && org.byId.has(value)) return agentPrincipal(value);
+    if (parsed?.kind === "agent" && org.byId.has(parsed.id)) return agentPrincipal(parsed.id);
+    if (parsed?.kind === "user" && this.projectUserIds(org).includes(parsed.id)) {
+      return userPrincipal(parsed.id);
+    }
+    throw badRequest(
+      `squad member must be an employee of ${org.orgId} or a member of this Project: ${raw}`,
+    );
+  }
+
+  /** Role map keys must name members in force — a role for nobody is a typo. */
+  private requireSquadRoles(members: string[], roles: Record<string, unknown>): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const [key, role] of Object.entries(roles)) {
+      if (typeof role !== "string") throw badRequest(`role for ${key} must be a string.`);
+      if (!members.includes(key.trim())) throw badRequest(`role names someone outside the squad: ${key}`);
+      if (role.trim() !== "") out[key.trim()] = role.trim();
+    }
+    return out;
+  }
+
+  /**
+   * Wakes a squad's leader with the dispatch protocol after an assignment (or a move out of
+   * `proposed`). Fire-and-record: a leader that cannot be woken is an error record inside
+   * the dispatch, never a failed write — the assignment already stands.
+   */
+  private async dispatchSquadLeader(
+    org: LoadedOrg,
+    ticketId: string,
+    doc: TicketDoc,
+    squad: SquadDoc,
+  ): Promise<void> {
+    const leaderId = principalAgentId(squad.leader);
+    if (leaderId === null || !org.byId.has(leaderId)) return;
+    try {
+      await dispatchToDesk(
+        this.deps,
+        org,
+        leaderId,
+        { kind: "ticket_work", ticket: ticketId },
+        squadDispatchBody(squad, org, ticketId, doc),
+        { hop: 0 },
+      );
+    } catch (err) {
+      this.deps.errors.record({
+        source: "organization",
+        err,
+        code: "org_squad_dispatch_failed",
+        ctx: { projectId: org.projectId, agentId: leaderId },
+      });
+    }
+  }
+
+  /** Post-write half of the assignment hooks: re-reads squad and ticket fresh, then dispatches. */
+  private async dispatchSquadForTicket(
+    projectId: string,
+    orgId: string,
+    ticketId: string,
+    squadId: string,
+  ): Promise<void> {
+    const org = await this.requireValidOrg(projectId, orgId);
+    const squad = (await this.readSquadsOrThrow(org))[squadId];
+    if (squad === undefined || squad.archived) return;
+    const t = await this.requireTicket(org, ticketId);
+    if (t.doc.owner !== squadPrincipal(squadId)) return;
+    await this.dispatchSquadLeader(org, ticketId, t.doc, squad);
+  }
+
   async updateTicket(
     projectId: string,
     orgId: string,
@@ -1695,6 +1925,9 @@ export class OrganizationService {
     req: OrgTicketUpdateRequest,
     actor: Actor,
   ): Promise<OrgTicketDetail> {
+    // A squad assignment that must wake the leader: captured in the lock, dispatched after
+    // the reconcile — starting a session run under the org lock would hold every org write.
+    let squadDispatch: string | null = null;
     await this.scheduler.withLock(projectId, orgId, async () => {
       const org = await this.requireValidOrg(projectId, orgId);
       const t = await this.requireTicket(org, ticketId);
@@ -1709,7 +1942,7 @@ export class OrganizationService {
       }
       let assigned: string | null = null;
       if (req.owner !== undefined && req.owner.trim() !== "") {
-        const owner = this.requireOwner(org, req.owner);
+        const owner = await this.requireOwner(org, req.owner);
         if (owner !== d.owner) assigned = owner;
         d.owner = owner;
       }
@@ -1763,6 +1996,10 @@ export class OrganizationService {
       const booked = this.bookSession(org, actor, d);
       await this.deps.store.writeTicket(org.dir, ticketId, t.column, d);
       this.cacheBookedSession(org, ticketId, booked);
+      // A squad assignment on a working ticket wakes the leader (a `proposed` ticket is
+      // parked — the move out carries the dispatch instead).
+      const squadId = assigned === null ? null : principalSquadId(assigned);
+      if (squadId !== null && t.column !== "proposed") squadDispatch = squadId;
       this.deps.notifyProject(projectId, {
         type: "org_ticket",
         projectId,
@@ -1772,6 +2009,7 @@ export class OrganizationService {
       });
     });
     await this.scheduler.reconcile(projectId, orgId);
+    if (squadDispatch !== null) await this.dispatchSquadForTicket(projectId, orgId, ticketId, squadDispatch);
     return this.ticket(projectId, orgId, ticketId);
   }
 
@@ -1783,6 +2021,9 @@ export class OrganizationService {
     reason: string | undefined,
     actor: Actor,
   ): Promise<OrgTicketDetail> {
+    // A squad-owned ticket leaving `proposed` wakes the leader — the assignment landed
+    // while parked, so the move carries the dispatch. Captured in the lock, run after.
+    let squadDispatch: string | null = null;
     await this.scheduler.withLock(projectId, orgId, async () => {
       const org = await this.requireValidOrg(projectId, orgId);
       if (!isTicketColumn(status)) throw badRequest("status must be a board column.");
@@ -1803,8 +2044,13 @@ export class OrganizationService {
       const booked = status === "review" ? this.bookSession(org, actor, d) : null;
       await this.deps.store.moveTicket(org.dir, ticketId, from, status, d);
       this.cacheBookedSession(org, ticketId, booked);
+      if (from === "proposed" && status !== "proposed") {
+        const squadId = principalSquadId(d.owner);
+        if (squadId !== null) squadDispatch = squadId;
+      }
     });
     await this.scheduler.reconcile(projectId, orgId);
+    if (squadDispatch !== null) await this.dispatchSquadForTicket(projectId, orgId, ticketId, squadDispatch);
     return this.ticket(projectId, orgId, ticketId);
   }
 
@@ -2639,6 +2885,77 @@ export class OrganizationService {
   }
 }
 
+function squadToDto(doc: SquadDoc): OrgSquad {
+  return {
+    id: doc.id,
+    name: doc.name,
+    leader: doc.leader,
+    members: [...doc.members],
+    roles: { ...doc.roles },
+    instructions: doc.instructions,
+    archived: doc.archived,
+  };
+}
+
+/**
+ * The leader's dispatch: the operating protocol (system-managed, not editable), the roster
+ * with the exact @-mention to paste per member, the squad's own instructions, and the
+ * ticket. Written in the organization's language, like every trigger body.
+ */
+export function squadDispatchBody(
+  squad: SquadDoc,
+  org: LoadedOrg,
+  ticketId: string,
+  doc: TicketDoc,
+): string {
+  const zh = orgLanguage(org.config) === "zh";
+  const displayName = (principal: string): string => {
+    const agentId = principalAgentId(principal);
+    if (agentId !== null) return org.byId.get(agentId)?.name ?? agentId;
+    return principal.startsWith("user:") ? principal.slice("user:".length) : principal;
+  };
+  const roster = squad.members.map((m) => {
+    const role = squad.roles[m];
+    const who = `${displayName(m)} (@${m})`;
+    return role !== undefined ? `- ${who}：${role}` : `- ${who}`;
+  });
+  const ticket = [
+    `${ticketId}「${doc.title}」`,
+    doc.goal.trim() !== "" ? `${zh ? "目标" : "Goal"}：${doc.goal.trim()}` : "",
+    doc.acceptanceCriteria.trim() !== ""
+      ? `${zh ? "验收" : "Acceptance"}：${doc.acceptanceCriteria.trim()}`
+      : "",
+  ]
+    .filter((line) => line !== "")
+    .join("\n");
+  if (zh) {
+    return [
+      `工单 ${ticketId} 指派给了 squad「${squad.name}」，你是它的 leader。`,
+      "",
+      "Squad 协作协议（照做，不要发挥）：读工单，把下一步派给最合适的成员——在工单频道里发一条 @-mention 对方的消息（@ 写法照花名册一字不差地抄；正文只写下一步是什么，不要复述工单全文，对方看得见）。派完即停，不要自己实现。父工单保持 in_progress；只有整体目标达成才移到 review；done 由人来关。",
+      "",
+      "花名册：",
+      ...roster,
+      ...(squad.instructions.trim() !== "" ? ["", "Squad 说明：", squad.instructions.trim()] : []),
+      "",
+      "工单：",
+      ticket,
+    ].join("\n");
+  }
+  return [
+    `Ticket ${ticketId} was assigned to squad "${squad.name}", and you are its leader.`,
+    "",
+    "Squad operating protocol (follow it, do not improvise): read the ticket, hand the next step to the best-suited member — post an @-mention of them in the ticket channel (copy the @ handle from the roster exactly; say only what the next step is, never restate the ticket, they can read it). Stop after dispatching; do not implement it yourself. The parent stays in_progress; move it to review only once the overall goal is met; a human closes it to done.",
+    "",
+    "Roster:",
+    ...roster,
+    ...(squad.instructions.trim() !== "" ? ["", "Squad instructions:", squad.instructions.trim()] : []),
+    "",
+    "Ticket:",
+    ticket,
+  ].join("\n");
+}
+
 // ---------------------------------------------------------------------------
 // Texts
 // ---------------------------------------------------------------------------
@@ -2845,6 +3162,11 @@ export abstract class OrgService extends Interface<
     | "progressTicket"
     | "startTicket"
     | "attachTicket"
+    | "listSquads"
+    | "squad"
+    | "createSquad"
+    | "updateSquad"
+    | "archiveSquad"
     | "channels"
     | "channel"
     | "createChannel"

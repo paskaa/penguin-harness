@@ -73,6 +73,23 @@ function requireTicketId(raw: string | undefined): string {
   return raw;
 }
 
+/** A squad role map: member principal → one line, at most 200 entries of 500 characters. */
+function requireRolesMap(raw: unknown): Record<string, string> {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw badRequest("roles must map member principals to strings.");
+  }
+  const entries = Object.entries(raw as Record<string, unknown>);
+  if (entries.length > 200) throw badRequest("roles holds at most 200 entries.");
+  const out: Record<string, string> = {};
+  for (const [key, value] of entries) {
+    if (typeof value !== "string" || value.length > 500) {
+      throw badRequest(`roles[${key}] must be a string of at most 500 characters.`);
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
 function requireName(raw: string | undefined, label: string): string {
   if (!raw || !isValidId(raw)) throw badRequest(`Invalid ${label}.`);
   return raw;
@@ -781,6 +798,73 @@ export function organizationRoutes(deps: OrgRouteDeps): Hono<AppEnv> {
     const sessionId = requireString(body, "sessionId", { minLen: 1, maxLen: 200 });
     return c.json(
       await deps.orgService.attachTicket(projectId, orgId, ticketId, sessionId, actorOf(c, body)),
+    );
+  });
+
+  // ---- squads ----
+
+  app.get("/:orgId/squads", async (c) => {
+    const projectId = requireValidId(c, "projectId");
+    const orgId = requireValidId(c, "orgId");
+    member(c, projectId);
+    return c.json(await deps.orgService.listSquads(projectId, orgId));
+  });
+
+  app.post("/:orgId/squads", async (c) => {
+    const projectId = requireValidId(c, "projectId");
+    const orgId = requireValidId(c, "orgId");
+    member(c, projectId);
+    const body = await readJson(c);
+    const members = optionalStringArray(body, "members");
+    const instructions = optionalString(body, "instructions", { maxLen: 20_000 });
+    const detail = await deps.orgService.createSquad(projectId, orgId, {
+      id: requireString(body, "id", { minLen: 2, maxLen: 64 }),
+      name: requireString(body, "name", { minLen: 1, maxLen: 100 }),
+      leader: requireString(body, "leader", { minLen: 1, maxLen: 100 }),
+      ...(members !== undefined ? { members } : {}),
+      ...(body.roles !== undefined ? { roles: requireRolesMap(body.roles) } : {}),
+      ...(instructions !== undefined ? { instructions } : {}),
+    });
+    return c.json(detail, 201);
+  });
+
+  app.get("/:orgId/squads/:squadId", async (c) => {
+    const projectId = requireValidId(c, "projectId");
+    const orgId = requireValidId(c, "orgId");
+    const squadId = requireValidId(c, "squadId");
+    member(c, projectId);
+    return c.json(await deps.orgService.squad(projectId, orgId, squadId));
+  });
+
+  app.put("/:orgId/squads/:squadId", async (c) => {
+    const projectId = requireValidId(c, "projectId");
+    const orgId = requireValidId(c, "orgId");
+    const squadId = requireValidId(c, "squadId");
+    member(c, projectId);
+    const body = await readJson(c);
+    const name = optionalString(body, "name", { minLen: 1, maxLen: 100 });
+    const leader = optionalString(body, "leader", { minLen: 1, maxLen: 100 });
+    const members = optionalStringArray(body, "members");
+    const instructions = optionalString(body, "instructions", { maxLen: 20_000 });
+    return c.json(
+      await deps.orgService.updateSquad(projectId, orgId, squadId, {
+        ...(name !== undefined ? { name } : {}),
+        ...(leader !== undefined ? { leader } : {}),
+        ...(members !== undefined ? { members } : {}),
+        ...(body.roles !== undefined ? { roles: requireRolesMap(body.roles) } : {}),
+        ...(instructions !== undefined ? { instructions } : {}),
+      }),
+    );
+  });
+
+  app.post("/:orgId/squads/:squadId/archive", async (c) => {
+    const projectId = requireValidId(c, "projectId");
+    const orgId = requireValidId(c, "orgId");
+    const squadId = requireValidId(c, "squadId");
+    member(c, projectId);
+    const body = await readJson(c);
+    return c.json(
+      await deps.orgService.archiveSquad(projectId, orgId, squadId, actorOf(c, body)),
     );
   });
 

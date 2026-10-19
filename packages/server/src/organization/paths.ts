@@ -41,6 +41,11 @@ export function desksPath(dir: string): string {
   return path.join(dir, "desks.toml");
 }
 
+/** `squads.toml`: cross-reporting-line groups (an intent file people and the API write). */
+export function squadsPath(dir: string): string {
+  return path.join(dir, "squads.toml");
+}
+
 /** `handbook/`: the organization handbook, the company's knowledge base. */
 export function handbookDir(dir: string): string {
   return path.join(dir, "handbook");

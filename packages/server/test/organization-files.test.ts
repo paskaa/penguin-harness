@@ -14,6 +14,7 @@ import {
   parseDesks,
   parseOrgChart,
   parseOrgConfig,
+  parseSquads,
   parseTicket,
   serializeCalendarEvent,
   serializeChannelConfig,
@@ -21,6 +22,7 @@ import {
   serializeDesks,
   serializeOrgChart,
   serializeOrgConfig,
+  serializeSquads,
   serializeTicket,
   slugSuffix,
   slugify,
@@ -171,6 +173,44 @@ describe("desks.toml", () => {
     };
     expect(parseDesks(serializeDesks(desks))).toEqual({ ok: true, value: desks });
     expect(parseDesks("")).toEqual({ ok: true, value: {} });
+  });
+});
+
+describe("squads.toml", () => {
+  it("round-trips squads with roles, instructions and archive marks", () => {
+    const squads = {
+      delivery: {
+        id: "delivery",
+        name: "产品交付",
+        leader: "agent:lead",
+        members: ["agent:lead", "agent:dev", "user:alice"],
+        roles: { "agent:dev": "前端实现" },
+        instructions: "DB 变更先让 qa 看一眼",
+        archived: false,
+      },
+      retired: {
+        id: "retired",
+        name: "旧组",
+        leader: "agent:lead",
+        members: ["agent:lead"],
+        roles: {},
+        instructions: "",
+        archived: true,
+      },
+    };
+    expect(parseSquads(serializeSquads(squads))).toEqual({ ok: true, value: squads });
+    expect(parseSquads("")).toEqual({ ok: true, value: {} });
+  });
+
+  it("rejects bad ids, duplicates, empty names and mistyped fields", () => {
+    expect(parseSquads('[[squads]]\nid = "Bad"\nname = "x"\nleader = "agent:a"\n').ok).toBe(false);
+    const dup =
+      '[[squads]]\nid = "a"\nname = "x"\nleader = "agent:a"\n[[squads]]\nid = "a"\nname = "y"\nleader = "agent:a"\n';
+    expect(parseSquads(dup).ok).toBe(false);
+    expect(parseSquads('[[squads]]\nid = "a"\nname = ""\nleader = "agent:a"\n').ok).toBe(false);
+    expect(
+      parseSquads('[[squads]]\nid = "a"\nname = "x"\nleader = "agent:a"\narchived = "yes"\n').ok,
+    ).toBe(false);
   });
 });
 

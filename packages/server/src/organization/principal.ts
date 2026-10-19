@@ -54,3 +54,20 @@ export function principalUserId(raw: string): string | null {
   const p = parsePrincipal(raw);
   return p?.kind === "user" ? p.id : null;
 }
+
+/**
+ * Squad notation — `squad:<id>`. Deliberately NOT a `Principal`: squads are assignees,
+ * not message senders, so they stay out of `parsePrincipal` and are only accepted where
+ * an assignee is (ticket owner; notify lists stay agent/user).
+ */
+export function squadPrincipal(squadId: string): string {
+  return `squad:${squadId}`;
+}
+
+/** The squad id behind a `squad:` string, or null for anything else. */
+export function principalSquadId(raw: string): string | null {
+  const value = raw.trim();
+  if (!value.startsWith("squad:")) return null;
+  const id = value.slice("squad:".length);
+  return id !== "" ? id : null;
+}

@@ -323,6 +323,64 @@ describe("organization routes", () => {
     expect((await owner.put(`${base}/tickets/2026-09-01-site`, { owner: null })).status).toBe(400);
   });
 
+  it("routes the squad family and validates its bodies", async () => {
+    const base = `/api/projects/${ownerProject}/organizations/acme`;
+    expect((await owner.get(`${base}/squads`)).status).toBe(200);
+    expect(calls.at(-1)).toMatchObject({ method: "listSquads", args: [ownerProject, "acme"] });
+    const created = await owner.post(`${base}/squads`, {
+      id: "delivery",
+      name: "Delivery",
+      leader: "agent:dev",
+      members: ["agent:qa"],
+      roles: { "agent:qa": "regression" },
+      instructions: "DB past QA.",
+    });
+    expect(created.status).toBe(201);
+    expect(calls.at(-1)).toMatchObject({
+      method: "createSquad",
+      args: [
+        ownerProject,
+        "acme",
+        {
+          id: "delivery",
+          name: "Delivery",
+          leader: "agent:dev",
+          members: ["agent:qa"],
+          roles: { "agent:qa": "regression" },
+          instructions: "DB past QA.",
+        },
+      ],
+    });
+    expect((await owner.get(`${base}/squads/delivery`)).status).toBe(200);
+    expect(calls.at(-1)).toMatchObject({ method: "squad", args: [ownerProject, "acme", "delivery"] });
+    expect((await owner.put(`${base}/squads/delivery`, { name: "DLV" })).status).toBe(200);
+    expect(calls.at(-1)).toMatchObject({
+      method: "updateSquad",
+      args: [ownerProject, "acme", "delivery", { name: "DLV" }],
+    });
+    expect((await owner.post(`${base}/squads/delivery/archive`, {})).status).toBe(200);
+    expect(calls.at(-1)).toMatchObject({
+      method: "archiveSquad",
+      args: [ownerProject, "acme", "delivery", { userId: "olivia" }],
+    });
+    // A role map that is not a map, or a role that is not a line, never reaches the service.
+    calls.length = 0;
+    expect(
+      (await owner.post(`${base}/squads`, { id: "x", name: "x", leader: "a", roles: ["qa"] })).status,
+    ).toBe(400);
+    expect(
+      (
+        await owner.post(`${base}/squads`, {
+          id: "x",
+          name: "x",
+          leader: "a",
+          roles: { "agent:qa": 42 },
+        })
+      ).status,
+    ).toBe(400);
+    expect(calls).toEqual([]);
+  });
+
   it("routes handbook documents by their relative path and keeps the index", async () => {
     const base = `/api/projects/${ownerProject}/organizations/acme/handbook`;
     expect((await owner.get(`${base}/files`)).status).toBe(200);
