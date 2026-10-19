@@ -4,11 +4,13 @@
  * pricing replaced by recording fakes and the clock under test control. Shared by the runtime
  * and scenario suites so both exercise the same seams the app binds in production.
  */
+import type { DatabaseSync } from "node:sqlite";
 import { saveProjectConfig } from "@prismshadow/penguin-core";
 import { wire } from "@prismshadow/penguin-core/kernel";
 import type { OmniMessage } from "@prismshadow/penguin-core";
 import type { ServerEvent } from "../src/api/types.js";
 import { openDatabase } from "../src/db/database.js";
+import { InboxReadsRepo } from "../src/db/repos/inbox-reads.js";
 import { MembersRepo } from "../src/db/repos/members.js";
 import { OrgCacheRepo } from "../src/db/repos/organizations.js";
 import { ProjectsRepo } from "../src/db/repos/projects.js";
@@ -135,6 +137,7 @@ export async function makeOrgHarness(opts: {
     projects,
     members: wire(MembersRepo, { db }),
     sessions,
+    inboxReads: new InboxReadsRepo(db as unknown as DatabaseSync),
     runner: {
       statusOf: (id) => (busy.has(id) ? "running" : "idle"),
       startTask: async (sessionId, input, o) => {

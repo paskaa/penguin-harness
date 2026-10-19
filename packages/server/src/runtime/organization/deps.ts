@@ -141,6 +141,36 @@ export interface OrgDeps {
   projects: Projects;
   members: Members;
   sessions: SessionIndex;
+  /** Inbox read/archive memory (`InboxReadsRepo`); absent in narrow tests (inbox reads unmarked, writes throw like a missing db). */
+  inboxReads?: {
+    states(
+      userId: string,
+      projectId: string,
+      orgId: string,
+    ): Map<string, { read: boolean; archived: boolean }>;
+    setRead(
+      userId: string,
+      projectId: string,
+      orgId: string,
+      keys: readonly string[],
+      read: boolean,
+      nowIso: string,
+    ): void;
+    setArchived(
+      userId: string,
+      projectId: string,
+      orgId: string,
+      rows: readonly { key: string; snapshot?: string }[],
+      archived: boolean,
+      nowIso: string,
+    ): void;
+    archived(
+      userId: string,
+      projectId: string,
+      orgId: string,
+      limit: number,
+    ): Array<{ rowKey: string; snapshot: string | null; updatedAt: string }>;
+  };
   runner: OrgTaskRunner;
   sessionCreator: OrgSessionCreator;
   agents: OrgAgentGateway;

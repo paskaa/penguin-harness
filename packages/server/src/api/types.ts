@@ -6373,9 +6373,37 @@ export interface OrganizationDetail extends OrganizationSummary {
  * each list; each capped at a page.
  */
 export interface OrgInbox {
-  mentions: OrgChannelMessage[];
-  blockedTickets: OrgTicketItem[];
-  doneTickets: Array<OrgTicketItem & { closedAt?: string }>;
+  mentions: OrgInboxMention[];
+  blockedTickets: OrgInboxTicketItem[];
+  doneTickets: Array<OrgInboxTicketItem & { closedAt?: string }>;
+}
+
+/** One mention row: the message plus its stable inbox key and read mark. */
+export interface OrgInboxMention extends OrgChannelMessage {
+  /** Stable key (`mention/<message id>`), shared with the web's row keys. */
+  inboxKey: string;
+  inboxRead: boolean;
+}
+
+/** One ticket row: the item plus its stable inbox key and read mark. */
+export interface OrgInboxTicketItem extends OrgTicketItem {
+  /** Stable key (`blocked/<ticket>` / `done/<ticket>`), shared with the web's row keys. */
+  inboxKey: string;
+  inboxRead: boolean;
+}
+
+/** Mark rows read/unread. */
+export interface OrgInboxReadRequest {
+  keys: string[];
+  read: boolean;
+}
+
+/** Archive/unarchive rows (archived rows leave the inbox; mentions ride a snapshot). */
+export interface OrgInboxArchiveRequest {
+  keys: string[];
+  archived: boolean;
+  /** Mention snapshots by row key (the client already holds the rows it shows). */
+  snapshots?: Record<string, OrgChannelMessage>;
 }
 
 export interface OrganizationCreateRequest {

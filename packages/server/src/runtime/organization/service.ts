@@ -30,6 +30,8 @@ import type {
   OrgFinanceResponse,
   OrgHireRequest,
   OrgInbox,
+  OrgInboxArchiveRequest,
+  OrgInboxReadRequest,
   OrgSessionsResponse,
   OrgSquad,
   OrgSquadCreateRequest,
@@ -55,6 +57,9 @@ import type {
 import { TICKET_SLUG_PATTERN } from "../../api/types.js";
 import { Interface, Module, Provide, Use } from "@prismshadow/penguin-core/kernel";
 import type { ClassCtx } from "@prismshadow/penguin-core/kernel";
+import type { DatabaseSync } from "node:sqlite";
+import type { Db } from "../../hmr/capabilities.js";
+import { InboxReadsRepo } from "../../db/repos/inbox-reads.js";
 import { HttpError } from "../../http/errors.js";
 import { userChannelKey } from "../../http/routes/events.js";
 import type { Channels, Clock, Config, Log } from "../../hmr/capabilities.js";
@@ -474,7 +479,7 @@ export class OrganizationService {
         blockedByMe: items.filter((t) => t.blockedBy === me),
       },
       recentMessages: recent?.messages.slice(-20) ?? [],
-      inbox: this.inbox(spend, items, tickets, recent?.messages ?? [], me),
+      inbox: this.inbox(projectId, orgId, userId, spend, items, tickets, recent?.messages ?? [], me),
       alerts: this.alerts(org, spend.period),
       ...(ceoDesk !== undefined ? { ceoDeskSessionId: ceoDesk.sessionId } : {}),
     };
@@ -497,16 +502,24 @@ export class OrganizationService {
    * descending is ordering by age.
    */
   private inbox(
+    projectId: string,
+    orgId: string,
+    userId: string,
     spend: OrgSpend,
     items: readonly OrgTicketItem[],
     tickets: readonly LoadedTicket[],
     windowMessages: readonly OrgChannelMessage[],
     me: string,
   ): OrgInbox {
+    const states = this.deps.inboxReads?.states(userId, projectId, orgId) ?? new Map();
+    const live = (key: string): boolean => states.get(key)?.archived !== true;
+    const read = (key: string): boolean => states.get(key)?.read === true;
     const mentions = windowMessages
       .filter((m) => m.mentions.includes(me) || m.mentions.includes("all"))
       .reverse()
-      .slice(0, INBOX_PAGE);
+      .slice(0, INBOX_PAGE)
+      .map((m) => ({ ...m, inboxKey: `mention/${m.id}`, inboxRead: read(`mention/${m.id}`) }))
+      .filter((m) => live(m.inboxKey));
     const newestFirst = <T extends { ticketId: string }>(a: T, b: T): number =>
       a.ticketId < b.ticketId ? 1 : a.ticketId > b.ticketId ? -1 : 0;
     const closedAt = new Map<string, string>();
@@ -523,14 +536,23 @@ export class OrganizationService {
       .filter((t) => t.status === "done")
       .map((t): OrgInbox["doneTickets"][number] => {
         const at = closedAt.get(t.ticketId);
-        return { ...t, ...(at !== undefined ? { closedAt: at } : {}) };
+        const inboxKey = `done/${t.ticketId}`;
+        return { ...t, ...(at !== undefined ? { closedAt: at } : {}), inboxKey, inboxRead: read(inboxKey) };
       })
       .filter((t) => t.closedAt === undefined || inPeriod(t.closedAt))
+      .filter((t) => live(t.inboxKey))
       .sort(newestFirst)
       .slice(0, INBOX_PAGE);
     return {
       mentions,
-      blockedTickets: items.filter((t) => (t.blocked ?? "") !== "").sort(newestFirst),
+      blockedTickets: items
+        .filter((t) => (t.blocked ?? "") !== "")
+        .map((t) => {
+          const inboxKey = `blocked/${t.ticketId}`;
+          return { ...t, inboxKey, inboxRead: read(inboxKey) };
+        })
+        .filter((t) => live(t.inboxKey))
+        .sort(newestFirst),
       doneTickets,
     };
   }
@@ -545,6 +567,108 @@ export class OrganizationService {
       mentions += (await this.channelActivity(org, file.channelId, userId)).mentionsMe;
     }
     return mentions;
+  }
+
+  /** Row keys this inbox accepts: the web's key shapes, nothing else. */
+  private requireInboxKeys(keys: unknown): string[] {
+    if (!Array.isArray(keys) || keys.length === 0 || keys.length > 200) {
+      throw badRequest("keys must be a non-empty list of at most 200 row keys.");
+    }
+    return keys.map((k) => {
+      if (typeof k !== "string" || !/^(mention|blocked|done)\/.+$/.test(k)) {
+        throw badRequest(`not an inbox row key: ${typeof k === "string" ? k.slice(0, 80) : typeof k}`);
+      }
+      return k;
+    });
+  }
+
+  private inboxRepo(): NonNullable<OrgDeps["inboxReads"]> {
+    const repo = this.deps.inboxReads;
+    if (repo === undefined) throw new HttpError(503, "inbox_state_unavailable", "Inbox state is unavailable.");
+    return repo;
+  }
+
+  /** Marks rows read/unread for the calling user. */
+  async markInboxRead(
+    projectId: string,
+    orgId: string,
+    userId: string,
+    req: OrgInboxReadRequest,
+  ): Promise<{ updated: number }> {
+    const org = await this.requireOrg(projectId, orgId);
+    void org;
+    const keys = this.requireInboxKeys(req.keys);
+    this.inboxRepo().setRead(userId, projectId, orgId, keys, req.read, new Date(this.now()).toISOString());
+    return { updated: keys.length };
+  }
+
+  /** Archives/unarchives rows; archiving a mention stores the snapshot the client sends. */
+  async markInboxArchived(
+    projectId: string,
+    orgId: string,
+    userId: string,
+    req: OrgInboxArchiveRequest,
+  ): Promise<{ updated: number }> {
+    const org = await this.requireOrg(projectId, orgId);
+    void org;
+    const keys = this.requireInboxKeys(req.keys);
+    const rows = keys.map((key) => {
+      const snapshot = req.snapshots?.[key];
+      if (snapshot !== undefined) {
+        const id = typeof snapshot === "object" && snapshot !== null ? (snapshot as { id?: unknown }).id : undefined;
+        if (id !== key.slice(key.indexOf("/") + 1)) {
+          throw badRequest(`snapshot id does not match its key: ${key.slice(0, 80)}`);
+        }
+      }
+      return { key, ...(snapshot !== undefined ? { snapshot: JSON.stringify(snapshot) } : {}) };
+    });
+    this.inboxRepo().setArchived(
+      userId,
+      projectId,
+      orgId,
+      rows,
+      req.archived,
+      new Date(this.now()).toISOString(),
+    );
+    return { updated: keys.length };
+  }
+
+  /** The user's archived rows: mentions from snapshots, tickets resolved live (gone tickets drop out). */
+  async archivedInbox(projectId: string, orgId: string, userId: string): Promise<OrgInbox> {
+    const org = await this.requireOrg(projectId, orgId);
+    const repo = this.deps.inboxReads;
+    if (repo === undefined) return { mentions: [], blockedTickets: [], doneTickets: [] };
+    const states = repo.states(userId, projectId, orgId);
+    const rows = repo.archived(userId, projectId, orgId, 100);
+    const { tickets } = await listTickets(this.deps, org);
+    const spend = await computeSpend(this.deps, org, tickets);
+    const items = new Map(this.ticketItems(tickets, spend).map((i) => [i.ticketId, i]));
+    const mentions: OrgInbox["mentions"] = [];
+    const blockedTickets: OrgInbox["blockedTickets"] = [];
+    const doneTickets: OrgInbox["doneTickets"] = [];
+    for (const row of rows) {
+      const read = states.get(row.rowKey)?.read === true;
+      if (row.rowKey.startsWith("mention/")) {
+        if (row.snapshot === null) continue;
+        try {
+          const msg = JSON.parse(row.snapshot) as OrgChannelMessage;
+          if (typeof msg.id !== "string" || typeof msg.text !== "string") continue;
+          mentions.push({ ...msg, inboxKey: row.rowKey, inboxRead: read });
+        } catch {
+          continue;
+        }
+      } else {
+        const ticketId = row.rowKey.slice(row.rowKey.indexOf("/") + 1);
+        const item = items.get(ticketId);
+        if (item === undefined) continue;
+        if (row.rowKey.startsWith("blocked/")) {
+          blockedTickets.push({ ...item, inboxKey: row.rowKey, inboxRead: read });
+        } else if (row.rowKey.startsWith("done/")) {
+          doneTickets.push({ ...item, inboxKey: row.rowKey, inboxRead: read });
+        }
+      }
+    }
+    return { mentions, blockedTickets, doneTickets };
   }
 
   private alerts(org: LoadedOrg, period: string): OrganizationDetail["alerts"] {
@@ -3313,6 +3437,9 @@ export abstract class OrgService extends Interface<
     | "createSquad"
     | "updateSquad"
     | "archiveSquad"
+    | "markInboxRead"
+    | "markInboxArchived"
+    | "archivedInbox"
     | "channels"
     | "channel"
     | "createChannel"
@@ -3364,6 +3491,7 @@ export class OrganizationModule {
   @Use() private readonly errors!: Errors;
   @Use() private readonly settings!: Settings;
   @Use() private readonly messagingRepo!: MessagingBindings;
+  @Use() private readonly db!: Db;
   @Provide() orgService!: OrgService;
   @Provide() orgScheduler!: OrgScheduler;
   setup({ effect }: ClassCtx) {
@@ -3380,6 +3508,7 @@ export class OrganizationModule {
       projects: this.projects,
       members: this.members,
       sessions: this.sessionsRepo,
+      inboxReads: new InboxReadsRepo(this.db as unknown as DatabaseSync),
       runner,
       sessionCreator: this.sessionCreator,
       agents: {

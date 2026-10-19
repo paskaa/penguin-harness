@@ -72,6 +72,19 @@ CREATE TABLE IF NOT EXISTS schedule_firings ( -- One row per firing: which sessi
 );
 CREATE INDEX IF NOT EXISTS idx_schedule_firings_task ON schedule_firings(project_id, agent_id, name, fired_at);`;
 
+export const INBOX_READS_SQL = `
+CREATE TABLE IF NOT EXISTS inbox_reads ( -- Per-user inbox row state: read + archived per (org, row key). Row keys mirror the web's InboxRow keys (mention/<id>, blocked/<ticket>, done/<ticket>); archived mentions carry a snapshot (message lookup by id has no index).
+  user_id    TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  org_id     TEXT NOT NULL,
+  row_key    TEXT NOT NULL,
+  is_read    INTEGER NOT NULL DEFAULT 0,
+  is_archived INTEGER NOT NULL DEFAULT 0,
+  snapshot   TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, project_id, org_id, row_key)
+);`;
+
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS users (
   user_id             TEXT PRIMARY KEY,            -- semantic id doubles as login name: ^[a-z][a-z0-9_-]{1,31}$
@@ -113,6 +126,7 @@ ${MODEL_PROVIDER_AUTH_TOKENS_SQL}
 ${MODEL_HEALTH_SQL}
 ${RUN_OUTCOMES_SQL}
 ${SCHEDULE_FIRINGS_SQL}
+${INBOX_READS_SQL}
 CREATE TABLE IF NOT EXISTS agents (           -- index only; name/description live in system_config.yaml
   project_id TEXT NOT NULL,
   agent_id   TEXT NOT NULL,

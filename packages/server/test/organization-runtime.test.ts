@@ -14,6 +14,7 @@
  * employee whose company plugins fell behind the library back up to it.
  */
 import { existsSync } from "node:fs";
+import type { DatabaseSync } from "node:sqlite";
 import fs from "node:fs/promises";
 import { wire } from "@prismshadow/penguin-core/kernel";
 import path from "node:path";
@@ -21,6 +22,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { parseOrgTriggerMessage, saveProjectConfig } from "@prismshadow/penguin-core";
 import type { OmniMessage } from "@prismshadow/penguin-core";
 import { openDatabase } from "../src/db/database.js";
+import { InboxReadsRepo } from "../src/db/repos/inbox-reads.js";
 import { MembersRepo } from "../src/db/repos/members.js";
 import { OrgCacheRepo } from "../src/db/repos/organizations.js";
 import { ProjectsRepo } from "../src/db/repos/projects.js";
@@ -168,6 +170,7 @@ describe("organization runtime", () => {
       projects,
       members: wire(MembersRepo, { db }),
       sessions,
+      inboxReads: new InboxReadsRepo(db as unknown as DatabaseSync),
       runner: {
         statusOf: (id) => (busy.has(id) ? "running" : "idle"),
         startTask: async (sessionId, input, opts) => {
@@ -1359,6 +1362,87 @@ describe("organization runtime", () => {
       expect(
         inbox.doneTickets.find((t) => t.ticketId === byHand.ticketId)?.closedAt,
       ).toBeUndefined();
+    });
+
+    it("marks rows read, archives them out of the inbox and brings them back unread-free", async () => {
+      await createOrg();
+      const alice = { userId: "alice" };
+      await service.sendChannelMessage(P, ORG, "alice", DEFAULT_CHANNEL_ID, {
+        text: "@user:alice the plan is ready",
+      });
+      const blocked = await service.createTicket(
+        P,
+        ORG,
+        { title: "Blocked one", slug: "b-blocked" },
+        alice,
+      );
+      await service.blockTicket(P, ORG, blocked.ticketId, "waiting on the vendor", undefined, alice);
+
+      const before = (await service.detail(P, ORG, "alice")).inbox!;
+      const mention = before.mentions.find((m) => m.text === "@user:alice the plan is ready")!;
+      const mentionKey = mention.inboxKey;
+      const blockedKey = `blocked/${blocked.ticketId}`;
+      // The key is the row's identity, and a fresh row starts unread.
+      expect(mentionKey).toBe(`mention/${mention.id}`);
+      expect(mention.inboxRead).toBe(false);
+      expect(before.blockedTickets.map((t) => t.inboxKey)).toContain(blockedKey);
+      expect(before.blockedTickets.find((t) => t.inboxKey === blockedKey)!.inboxRead).toBe(false);
+
+      expect(
+        await service.markInboxRead(P, ORG, "alice", { keys: [mentionKey, blockedKey], read: true }),
+      ).toEqual({ updated: 2 });
+      const readBack = (await service.detail(P, ORG, "alice")).inbox!;
+      expect(readBack.mentions.find((m) => m.inboxKey === mentionKey)?.inboxRead).toBe(true);
+      expect(readBack.blockedTickets.find((t) => t.inboxKey === blockedKey)?.inboxRead).toBe(true);
+
+      await service.markInboxArchived(P, ORG, "alice", {
+        keys: [mentionKey, blockedKey],
+        archived: true,
+        snapshots: { [mentionKey]: mention },
+      });
+      const after = (await service.detail(P, ORG, "alice")).inbox!;
+      expect(after.mentions.map((m) => m.inboxKey)).not.toContain(mentionKey);
+      expect(after.blockedTickets.map((t) => t.inboxKey)).not.toContain(blockedKey);
+
+      // Archived rows are listed separately: the mention from the snapshot the caller sent,
+      // the ticket resolved against the board as it stands now.
+      const archived = await service.archivedInbox(P, ORG, "alice");
+      expect(archived.mentions.map((m) => m.inboxKey)).toEqual([mentionKey]);
+      expect(archived.mentions[0]!.text).toBe("@user:alice the plan is ready");
+      expect(archived.mentions[0]!.inboxRead).toBe(true);
+      expect(archived.blockedTickets.map((t) => t.inboxKey)).toEqual([blockedKey]);
+
+      await service.markInboxArchived(P, ORG, "alice", {
+        keys: [mentionKey, blockedKey],
+        archived: false,
+      });
+      const restored = (await service.detail(P, ORG, "alice")).inbox!;
+      expect(restored.mentions.map((m) => m.inboxKey)).toContain(mentionKey);
+      expect(restored.blockedTickets.map((t) => t.inboxKey)).toContain(blockedKey);
+      expect((await service.archivedInbox(P, ORG, "alice")).mentions).toEqual([]);
+    });
+
+    it("refuses a row key it cannot key a row by, and a snapshot that names another message", async () => {
+      await createOrg();
+      const bad = [
+        { keys: [], read: true },
+        { keys: ["mention"], read: true },
+        { keys: ["nope/x"], read: true },
+        { keys: Array.from({ length: 201 }, (_v, i) => `mention/m${i}`), read: true },
+      ];
+      for (const req of bad) {
+        await expect(service.markInboxRead(P, ORG, "alice", req)).rejects.toThrow();
+      }
+      await expect(
+        service.markInboxArchived(P, ORG, "alice", {
+          keys: ["mention/m1"],
+          archived: true,
+          snapshots: { "mention/m1": { id: "m2" } as never },
+        }),
+      ).rejects.toThrow(/snapshot id does not match/);
+      // Nothing was written by the refusals.
+      expect((await service.detail(P, ORG, "alice")).inbox!.mentions).toEqual([]);
+      expect((await service.archivedInbox(P, ORG, "alice")).mentions).toEqual([]);
     });
   });
 

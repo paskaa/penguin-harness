@@ -34,6 +34,7 @@ import type { Context } from "hono";
 import { isValidId } from "@prismshadow/penguin-core";
 import type {
   OrgApprovalMode,
+  OrgChannelMessage,
   OrgLanguage,
   OrgStatus,
   OrgTicketPriority,
@@ -866,6 +867,58 @@ export function organizationRoutes(deps: OrgRouteDeps): Hono<AppEnv> {
     return c.json(
       await deps.orgService.archiveSquad(projectId, orgId, squadId, actorOf(c, body)),
     );
+  });
+
+  // ---- inbox state ----
+
+  app.post("/:orgId/inbox/read", async (c) => {
+    const projectId = requireValidId(c, "projectId");
+    const orgId = requireValidId(c, "orgId");
+    member(c, projectId);
+    const body = await readJson(c);
+    const keys = optionalStringArray(body, "keys");
+    const read = optionalBoolean(body, "read");
+    if (keys === undefined || read === undefined) {
+      throw badRequest("keys and read are required.");
+    }
+    return c.json(
+      await deps.orgService.markInboxRead(projectId, orgId, c.var.user.userId, { keys, read }),
+    );
+  });
+
+  app.post("/:orgId/inbox/archive", async (c) => {
+    const projectId = requireValidId(c, "projectId");
+    const orgId = requireValidId(c, "orgId");
+    member(c, projectId);
+    const body = await readJson(c);
+    const keys = optionalStringArray(body, "keys");
+    const archived = optionalBoolean(body, "archived");
+    if (keys === undefined || archived === undefined) {
+      throw badRequest("keys and archived are required.");
+    }
+    const snapshots = body.snapshots;
+    if (
+      snapshots !== undefined &&
+      (snapshots === null || typeof snapshots !== "object" || Array.isArray(snapshots))
+    ) {
+      throw badRequest("snapshots must map row keys to messages.");
+    }
+    return c.json(
+      await deps.orgService.markInboxArchived(projectId, orgId, c.var.user.userId, {
+        keys,
+        archived,
+        ...(snapshots !== undefined
+          ? { snapshots: snapshots as Record<string, OrgChannelMessage> }
+          : {}),
+      }),
+    );
+  });
+
+  app.get("/:orgId/inbox/archived", async (c) => {
+    const projectId = requireValidId(c, "projectId");
+    const orgId = requireValidId(c, "orgId");
+    member(c, projectId);
+    return c.json(await deps.orgService.archivedInbox(projectId, orgId, c.var.user.userId));
   });
 
   // ---- channels ----

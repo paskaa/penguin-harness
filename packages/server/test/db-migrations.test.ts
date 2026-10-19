@@ -80,6 +80,11 @@ function dropScheduleFirings(db: DatabaseSync): void {
   db.exec("DROP TABLE IF EXISTS schedule_firings");
 }
 
+/** Migration 23's table: a database stamped before it had none. */
+function dropInboxReads(db: DatabaseSync): void {
+  db.exec("DROP TABLE IF EXISTS inbox_reads");
+}
+
 /** Every company-mode table the migrations add: a database from before them had none. */
 function dropCompanyModeTables(db: DatabaseSync): void {
   for (const table of [
@@ -111,6 +116,7 @@ function open024(): DatabaseSync {
   dropModelHealth(db);
   dropRunOutcomes(db);
   dropScheduleFirings(db);
+  dropInboxReads(db);
   db.exec("DROP TABLE IF EXISTS model_promotions");
   dropCompanyModeTables(db);
   db.exec("DROP TABLE messaging_bindings");
@@ -159,6 +165,7 @@ function open6(): DatabaseSync {
   dropModelHealth(db);
   dropRunOutcomes(db);
   dropScheduleFirings(db);
+  dropInboxReads(db);
   db.exec("DROP TABLE IF EXISTS model_promotions");
   db.exec(PRE_CHANNEL_CHAT_DDL);
   // SCHEMA_SQL declares the CURRENT shape; migration 8's queue came after 6.
@@ -179,6 +186,7 @@ function open7(): DatabaseSync {
   dropModelHealth(db);
   dropRunOutcomes(db);
   dropScheduleFirings(db);
+  dropInboxReads(db);
   db.exec("DROP TABLE IF EXISTS model_promotions");
   db.exec("PRAGMA user_version = 7");
   return db;
@@ -195,6 +203,7 @@ function open8(): DatabaseSync {
   dropModelHealth(db);
   dropRunOutcomes(db);
   dropScheduleFirings(db);
+  dropInboxReads(db);
   db.exec("DROP TABLE IF EXISTS model_promotions");
   db.exec("PRAGMA user_version = 8");
   return db;
@@ -211,6 +220,7 @@ function open9(): DatabaseSync {
   dropModelHealth(db);
   dropRunOutcomes(db);
   dropScheduleFirings(db);
+  dropInboxReads(db);
   db.exec("PRAGMA user_version = 9");
   return db;
 }
@@ -226,6 +236,7 @@ function open029(): DatabaseSync {
   dropModelHealth(db);
   dropRunOutcomes(db);
   dropScheduleFirings(db);
+  dropInboxReads(db);
   db.exec("DROP TABLE IF EXISTS model_promotions");
   dropCompanyModeTables(db);
   db.exec(GOAL_STATE_DDL);
@@ -253,6 +264,7 @@ function openPreProfile(): DatabaseSync {
   dropModelHealth(db);
   dropRunOutcomes(db);
   dropScheduleFirings(db);
+  dropInboxReads(db);
   db.exec("DROP TABLE IF EXISTS model_promotions");
   dropProfileColumns(db);
   // Version 4 predates company mode as well: its three migrations (6–8) come after the
@@ -661,6 +673,7 @@ describe("migration 8 → current: model-promotions", () => {
         "schedule-auto-pause",
         "run-outcomes",
         "schedule-firings",
+        "inbox-reads",
       ]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       expect(promotionsTableExists()).toEqual({ "1": 1 });
@@ -693,6 +706,7 @@ describe("migration 8 → current: model-promotions", () => {
         "schedule-auto-pause",
         "run-outcomes",
         "schedule-firings",
+        "inbox-reads",
       ]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
     } finally {
@@ -725,6 +739,7 @@ describe("migration 9 → current: model-provider-auth-tokens", () => {
         "schedule-auto-pause",
         "run-outcomes",
         "schedule-firings",
+        "inbox-reads",
       ]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       expect(tableExists()).toEqual({ "1": 1 });
@@ -763,6 +778,7 @@ function open12(): DatabaseSync {
   dropModelHealth(db);
   dropRunOutcomes(db);
   dropScheduleFirings(db);
+  dropInboxReads(db);
   db.exec("PRAGMA user_version = 12");
   return db;
 }
@@ -782,6 +798,7 @@ describe("migration 12 → current: browser-extensions", () => {
         "schedule-auto-pause",
         "run-outcomes",
         "schedule-firings",
+        "inbox-reads",
       ]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       db.exec("PRAGMA foreign_keys = ON");
@@ -834,6 +851,7 @@ function open13(): DatabaseSync {
   dropModelHealth(db);
   dropRunOutcomes(db);
   dropScheduleFirings(db);
+  dropInboxReads(db);
   db.exec("PRAGMA user_version = 13");
   return db;
 }
@@ -852,6 +870,7 @@ describe("migration 13 → current: agent-api", () => {
         "schedule-auto-pause",
         "run-outcomes",
         "schedule-firings",
+        "inbox-reads",
       ]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       const enable = () =>
@@ -929,6 +948,7 @@ function open14(): DatabaseSync {
   dropModelHealth(db);
   dropRunOutcomes(db);
   dropScheduleFirings(db);
+  dropInboxReads(db);
   db.exec("PRAGMA user_version = 14");
   return db;
 }
@@ -947,6 +967,7 @@ describe("migration 14 → current: messaging-conversations", () => {
         "schedule-auto-pause",
         "run-outcomes",
         "schedule-firings",
+        "inbox-reads",
       ]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       const put = () =>
@@ -974,6 +995,7 @@ function open15(): DatabaseSync {
   dropModelHealth(db);
   dropRunOutcomes(db);
   dropScheduleFirings(db);
+  dropInboxReads(db);
   db.exec("ALTER TABLE sessions DROP COLUMN kept_at");
   db.exec("PRAGMA user_version = 15");
   return db;
@@ -998,6 +1020,7 @@ describe("migration 15 → current: sessions-kept-at", () => {
         "schedule-auto-pause",
         "run-outcomes",
         "schedule-firings",
+        "inbox-reads",
       ]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       expect(db.prepare("SELECT session_id, kept_at FROM sessions").all()).toEqual([
@@ -1338,6 +1361,7 @@ function open18(): DatabaseSync {
   dropModelHealth(db);
   dropRunOutcomes(db);
   dropScheduleFirings(db);
+  dropInboxReads(db);
   db.exec("ALTER TABLE schedule_state DROP COLUMN fail_count");
   db.exec("ALTER TABLE schedule_state DROP COLUMN auto_paused_at");
   db.exec("ALTER TABLE schedule_state DROP COLUMN auto_pause_reason");
@@ -1355,12 +1379,12 @@ describe("migration 18 → current: model-health", () => {
     const db = open18();
     try {
       expect(healthTableExists(db)).toBeUndefined();
-      expect(migrate(db).applied).toEqual(["model-health", "schedule-auto-pause", "run-outcomes", "schedule-firings"]);
+      expect(migrate(db).applied).toEqual(["model-health", "schedule-auto-pause", "run-outcomes", "schedule-firings", "inbox-reads"]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       expect(healthTableExists(db)).toEqual({ ok: 1 });
       rollbackTo(db, 18);
       expect(healthTableExists(db)).toBeUndefined();
-      expect(migrate(db).applied).toEqual(["model-health", "schedule-auto-pause", "run-outcomes", "schedule-firings"]);
+      expect(migrate(db).applied).toEqual(["model-health", "schedule-auto-pause", "run-outcomes", "schedule-firings", "inbox-reads"]);
       expect(healthTableExists(db)).toEqual({ ok: 1 });
     } finally {
       db.close();
@@ -1370,7 +1394,7 @@ describe("migration 18 → current: model-health", () => {
   it("is safe to create while a pushed platform boots", () => {
     const db = open18();
     try {
-      expect(migrate(db, { swapPath: true }).applied).toEqual(["model-health", "schedule-auto-pause", "run-outcomes", "schedule-firings"]);
+      expect(migrate(db, { swapPath: true }).applied).toEqual(["model-health", "schedule-auto-pause", "run-outcomes", "schedule-firings", "inbox-reads"]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
     } finally {
       db.close();
@@ -1384,6 +1408,7 @@ function open19(): DatabaseSync {
   db.exec(SCHEMA_SQL);
   dropRunOutcomes(db);
   dropScheduleFirings(db);
+  dropInboxReads(db);
   db.exec("ALTER TABLE schedule_state DROP COLUMN fail_count");
   db.exec("ALTER TABLE schedule_state DROP COLUMN auto_paused_at");
   db.exec("ALTER TABLE schedule_state DROP COLUMN auto_pause_reason");
@@ -1403,7 +1428,7 @@ describe("migration 19 → current: schedule-auto-pause", () => {
     const db = open19();
     try {
       expect(columns(db)).not.toContain("fail_count");
-      expect(migrate(db).applied).toEqual(["schedule-auto-pause", "run-outcomes", "schedule-firings"]);
+      expect(migrate(db).applied).toEqual(["schedule-auto-pause", "run-outcomes", "schedule-firings", "inbox-reads"]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       expect(columns(db)).toEqual(expect.arrayContaining(["fail_count", "auto_paused_at", "auto_pause_reason"]));
       // A second pass is a no-op: the declarative track may already have applied it (ADOPTION).
@@ -1416,7 +1441,7 @@ describe("migration 19 → current: schedule-auto-pause", () => {
   it("is safe to add while a pushed platform boots", () => {
     const db = open19();
     try {
-      expect(migrate(db, { swapPath: true }).applied).toEqual(["schedule-auto-pause", "run-outcomes", "schedule-firings"]);
+      expect(migrate(db, { swapPath: true }).applied).toEqual(["schedule-auto-pause", "run-outcomes", "schedule-firings", "inbox-reads"]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
     } finally {
       db.close();
@@ -1430,6 +1455,7 @@ function open20(): DatabaseSync {
   db.exec(SCHEMA_SQL);
   dropRunOutcomes(db);
   dropScheduleFirings(db);
+  dropInboxReads(db);
   db.exec("PRAGMA user_version = 20");
   return db;
 }
@@ -1444,12 +1470,12 @@ describe("migration 20 → current: run-outcomes", () => {
     const db = open20();
     try {
       expect(outcomesTableExists(db)).toBeUndefined();
-      expect(migrate(db).applied).toEqual(["run-outcomes", "schedule-firings"]);
+      expect(migrate(db).applied).toEqual(["run-outcomes", "schedule-firings", "inbox-reads"]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       expect(outcomesTableExists(db)).toEqual({ ok: 1 });
       rollbackTo(db, 20);
       expect(outcomesTableExists(db)).toBeUndefined();
-      expect(migrate(db).applied).toEqual(["run-outcomes", "schedule-firings"]);
+      expect(migrate(db).applied).toEqual(["run-outcomes", "schedule-firings", "inbox-reads"]);
       expect(outcomesTableExists(db)).toEqual({ ok: 1 });
     } finally {
       db.close();
@@ -1459,7 +1485,7 @@ describe("migration 20 → current: run-outcomes", () => {
   it("is safe to create while a pushed platform boots", () => {
     const db = open20();
     try {
-      expect(migrate(db, { swapPath: true }).applied).toEqual(["run-outcomes", "schedule-firings"]);
+      expect(migrate(db, { swapPath: true }).applied).toEqual(["run-outcomes", "schedule-firings", "inbox-reads"]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
     } finally {
       db.close();
@@ -1472,6 +1498,7 @@ function open21(): DatabaseSync {
   const db = new sqlite.DatabaseSync(":memory:");
   db.exec(SCHEMA_SQL);
   dropScheduleFirings(db);
+  dropInboxReads(db);
   db.exec("PRAGMA user_version = 21");
   return db;
 }
@@ -1486,12 +1513,12 @@ describe("migration 21 → current: schedule-firings", () => {
     const db = open21();
     try {
       expect(firingsTableExists(db)).toBeUndefined();
-      expect(migrate(db).applied).toEqual(["schedule-firings"]);
+      expect(migrate(db).applied).toEqual(["schedule-firings", "inbox-reads"]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       expect(firingsTableExists(db)).toEqual({ ok: 1 });
       rollbackTo(db, 21);
       expect(firingsTableExists(db)).toBeUndefined();
-      expect(migrate(db).applied).toEqual(["schedule-firings"]);
+      expect(migrate(db).applied).toEqual(["schedule-firings", "inbox-reads"]);
       expect(firingsTableExists(db)).toEqual({ ok: 1 });
     } finally {
       db.close();
@@ -1501,7 +1528,60 @@ describe("migration 21 → current: schedule-firings", () => {
   it("is safe to create while a pushed platform boots", () => {
     const db = open21();
     try {
-      expect(migrate(db, { swapPath: true }).applied).toEqual(["schedule-firings"]);
+      expect(migrate(db, { swapPath: true }).applied).toEqual(["schedule-firings", "inbox-reads"]);
+      expect(schemaVersion(db)).toBe(LATEST_VERSION);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+/** A database stamped at migration 22: everything before the inbox read/archive state. */
+function open22(): DatabaseSync {
+  const db = new sqlite.DatabaseSync(":memory:");
+  db.exec(SCHEMA_SQL);
+  dropInboxReads(db);
+  db.exec("PRAGMA user_version = 22");
+  return db;
+}
+
+describe("migration 22 → current: inbox-reads", () => {
+  const tableExists = (db: DatabaseSync) =>
+    db
+      .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'inbox_reads'")
+      .get();
+
+  it("creates the per-user row state, one row per key, and its down drops it again", () => {
+    const db = open22();
+    try {
+      expect(tableExists(db)).toBeUndefined();
+      expect(migrate(db).applied).toEqual(["inbox-reads"]);
+      expect(schemaVersion(db)).toBe(LATEST_VERSION);
+      expect(tableExists(db)).toEqual({ ok: 1 });
+      const insert = () =>
+        db
+          .prepare(
+            "INSERT INTO inbox_reads (user_id, project_id, org_id, row_key, is_read, updated_at)" +
+              " VALUES ('alice', 'p1', 'acme', 'mention/m1', 0, '2026-10-19T00:00:00.000Z')",
+          )
+          .run();
+      insert();
+      // One state per person, organization and row key.
+      expect(insert).toThrow(/UNIQUE|PRIMARY KEY/);
+      rollbackTo(db, 22);
+      expect(schemaVersion(db)).toBe(22);
+      expect(tableExists(db)).toBeUndefined();
+      expect(migrate(db).applied).toEqual(["inbox-reads"]);
+      expect(tableExists(db)).toEqual({ ok: 1 });
+    } finally {
+      db.close();
+    }
+  });
+
+  it("is safe to create while a pushed platform boots", () => {
+    const db = open22();
+    try {
+      expect(migrate(db, { swapPath: true }).applied).toEqual(["inbox-reads"]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
     } finally {
       db.close();

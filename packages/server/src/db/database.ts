@@ -83,6 +83,10 @@ export function openDatabase(dbPath: string): DatabaseSync {
   ensureColumn(db, "sessions", "fork_count", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(db, "sessions", "thinking_level", "TEXT");
   ensureColumn(db, "sessions", "sandbox", "TEXT");
+  // Restored: 147ffb66 added these two and a later commit (90a58584) dropped them again, so a
+  // legacy web.db upgraded by this build lacked the columns every INSERT now names.
+  ensureColumn(db, "sessions", "parent_session_id", "TEXT");
+  ensureColumn(db, "sessions", "squad", "TEXT");
   // A v0.2.0 web.db has auth_sessions without `via`; CREATE TABLE IF NOT EXISTS never adds a
   // column, so every INSERT would fail "no column named via" until this runs.
   ensureColumn(db, "auth_sessions", "via", "TEXT");

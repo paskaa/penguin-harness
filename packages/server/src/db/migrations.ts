@@ -776,6 +776,33 @@ export const MIGRATIONS: readonly Migration[] = [
       db.exec("DROP TABLE IF EXISTS schedule_firings");
     },
   },
+  {
+    version: 23,
+    name: "inbox-reads",
+    // Additive: one new table. Per-user inbox read/archive state; a predecessor
+    // build never reads it and serves every row unread, so a rollback survives it.
+    swapSafe: true,
+    up(db) {
+      // Frozen copy of the DDL as of the inbox read/archive landing; do not re-derive from schema.ts.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS inbox_reads ( -- Per-user inbox row state: read + archived per (org, row key). Row keys mirror the web's InboxRow keys (mention/<id>, blocked/<ticket>, done/<ticket>); archived mentions carry a snapshot (message lookup by id has no index).
+          user_id    TEXT NOT NULL,
+          project_id TEXT NOT NULL,
+          org_id     TEXT NOT NULL,
+          row_key    TEXT NOT NULL,
+          is_read    INTEGER NOT NULL DEFAULT 0,
+          is_archived INTEGER NOT NULL DEFAULT 0,
+          snapshot   TEXT,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (user_id, project_id, org_id, row_key)
+        );
+      `);
+    },
+    // LOSES read/archive marks: every row reads unread and unarchived again.
+    down(db) {
+      db.exec("DROP TABLE IF EXISTS inbox_reads");
+    },
+  },
 ];
 
 /** The highest version this build knows how to reach. */

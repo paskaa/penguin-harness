@@ -595,6 +595,71 @@ describe("organization routes", () => {
     expect(calls.at(-1)).toMatchObject({ method: "unblockTicket" });
   });
 
+  it("marks inbox rows read and archived for the caller, and lists the archived rows", async () => {
+    const base = `/api/projects/${ownerProject}/organizations/acme`;
+    const snapshot = { id: "m1", channelId: "default_channel", text: "@user:olivia ship it" };
+
+    const read = await owner.post(`${base}/inbox/read`, { keys: ["mention/m1"], read: true });
+    expect(read.status).toBe(200);
+    // The row state belongs to the signed-in caller, never to a session the body names.
+    expect(calls.at(-1)).toEqual({
+      method: "markInboxRead",
+      args: [ownerProject, "acme", "olivia", { keys: ["mention/m1"], read: true }],
+    });
+
+    const archive = await owner.post(`${base}/inbox/archive`, {
+      keys: ["mention/m1", "blocked/2026-09-01-site"],
+      archived: true,
+      snapshots: { "mention/m1": snapshot },
+    });
+    expect(archive.status).toBe(200);
+    expect(calls.at(-1)).toEqual({
+      method: "markInboxArchived",
+      args: [
+        ownerProject,
+        "acme",
+        "olivia",
+        { keys: ["mention/m1", "blocked/2026-09-01-site"], archived: true, snapshots: { "mention/m1": snapshot } },
+      ],
+    });
+
+    const unarchive = await owner.post(`${base}/inbox/archive`, {
+      keys: ["mention/m1"],
+      archived: false,
+    });
+    expect(unarchive.status).toBe(200);
+    expect(calls.at(-1)?.args).toEqual([
+      ownerProject,
+      "acme",
+      "olivia",
+      { keys: ["mention/m1"], archived: false },
+    ]);
+
+    const archived = await owner.get(`${base}/inbox/archived`);
+    expect(archived.status).toBe(200);
+    expect(calls.at(-1)).toEqual({
+      method: "archivedInbox",
+      args: [ownerProject, "acme", "olivia"],
+    });
+  });
+
+  it("refuses an inbox write with no keys, no flag or a snapshots value that is not a map", async () => {
+    const base = `/api/projects/${ownerProject}/organizations/acme`;
+    const cases: Array<[string, unknown]> = [
+      [`${base}/inbox/read`, { keys: ["mention/m1"] }], // read missing
+      [`${base}/inbox/read`, { keys: "mention/m1", read: true }],
+      [`${base}/inbox/archive`, { keys: ["mention/m1"] }], // archived missing
+      [`${base}/inbox/archive`, { keys: ["mention/m1"], archived: "yes" }],
+      [`${base}/inbox/archive`, { keys: ["mention/m1"], archived: true, snapshots: ["m1"] }],
+    ];
+    for (const [path, body] of cases) {
+      const res = await owner.post(path, body);
+      expect(res.status, `${path} ${JSON.stringify(body)}`).toBe(400);
+    }
+    // A refusal never reaches the service.
+    expect(calls).toEqual([]);
+  });
+
   it("drops a signed-in member's session id: the write cannot be attributed to that employee", async () => {
     const base = `/api/projects/${ownerProject}/organizations/acme`;
     const mallory = await provisionUser(t.app, "mallory");
