@@ -1748,6 +1748,14 @@ export const deleteSchedule = (projectId: string, agentId: string, name: string)
     { method: "DELETE" },
   );
 
+/** Lift an auto-pause: the ticks run again and the count behind the pause is forgotten. */
+export const resumeSchedule = (projectId: string, agentId: string, name: string) =>
+  apiFetch<{ resumed: boolean }>(
+    `/api/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentId)}` +
+      `/schedules/${encodeURIComponent(name)}/resume`,
+    { method: "POST" },
+  );
+
 // Plugin library, and an Agent's installed skills and hook packages ----------------------------
 
 /** Plugin library (available to any logged-in user): groups, each plugin's manifest and the metadata of its skills — never SKILL.md bodies or hook scripts. */

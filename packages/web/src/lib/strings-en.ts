@@ -2613,6 +2613,8 @@ export const en: Strings = {
     toastSaved: "Scheduled task saved",
     toastEnabled: "Scheduled task enabled",
     toastDisabled: "Scheduled task disabled",
+    resume: "Resume",
+    toastResumed: "Scheduled task resumed",
     /** The form's target line when it is pinned to one Session (the chat dock panel). */
     targetThisSession: "This conversation",
     /** The chat dock's scheduled-tasks panel (features/schedules/schedule-panel.tsx): the current Session's tasks. */

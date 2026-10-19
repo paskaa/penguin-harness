@@ -101,6 +101,21 @@ export function ScheduleDetailDialog({
     }
   };
 
+  /** Lift an auto-pause: the ticks run again from the next slot. */
+  const resume = async () => {
+    if (projectId === null) return;
+    setBusy(true);
+    try {
+      await api.resumeSchedule(projectId, item.agentId, item.name);
+      toastSuccess(S.schedule.toastResumed);
+      onChanged();
+    } catch (e) {
+      toastError(apiErrorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const remove = async () => {
     if (projectId === null) return;
     setBusy(true);
@@ -136,6 +151,11 @@ export function ScheduleDetailDialog({
               </Button>
             )}
             <div className="grow" />
+            {canEdit && (item.status as string) === "auto_paused" && (
+              <Button size="sm" disabled={busy} onClick={() => void resume()}>
+                {S.schedule.resume}
+              </Button>
+            )}
             {canEdit && (
               <Button size="sm" disabled={busy} onClick={() => void toggle()}>
                 {item.enabled ? S.schedule.disable : S.schedule.enable}

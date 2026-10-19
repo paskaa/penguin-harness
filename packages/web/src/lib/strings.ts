@@ -2780,6 +2780,8 @@ export const zh = {
     toastSaved: "已保存定时任务",
     toastEnabled: "已启用定时任务",
     toastDisabled: "已停用定时任务",
+    resume: "恢复",
+    toastResumed: "已恢复定时任务",
     /** The form's target line when it is pinned to one Session (the chat dock panel). */
     targetThisSession: "本对话",
     /** The chat dock's scheduled-tasks panel (features/schedules/schedule-panel.tsx): the current Session's tasks. */
