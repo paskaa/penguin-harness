@@ -14,6 +14,7 @@ import type {
   DefaultModelResponse,
   EndpointModelListRequest,
   ModelBalanceResponse,
+  ModelHealthListResponse,
   ModelProtocolDetectRequest,
   ModelRefDto,
   ModelsUpdateRequest,
@@ -321,6 +322,72 @@ export function modelsRoutes(deps: ModelsRouteDeps): Hono<AppEnv> {
     const res = await deps.projectConfigService.updateModels(projectId, req);
     modelConfigChanged(deps, projectId);
     return c.json(res);
+  });
+
+  // Health memory reads (any member, like the table itself): consecutive transport
+  // failures and quality bans per model, bans resolved at read time. Nothing here is a
+  // secret — counts, codes and timestamps — so members read what owners clear below.
+  app.get("/health", async (c) => {
+    const projectId = requireValidId(c, "projectId");
+    deps.access.requireProjectAccess(c.var.user.userId, projectId);
+    const health = await deps.projectConfigService.getModelHealth(projectId);
+    return c.json({ health } satisfies ModelHealthListResponse);
+  });
+
+  // Manual quality report (owner): "this model answered badly". The count rises, and at
+  // the threshold the model is banned for the cooldown — failover skips it the same way
+  // it skips transport-dead models. The only quality producer in v1; automatic judges
+  // report through this same door when one exists.
+  app.post("/health/quality", async (c) => {
+    const projectId = requireValidId(c, "projectId");
+    deps.access.requireProjectOwner(c.var.user.userId, projectId);
+    const body = await readJson(c);
+    const ref = parseRef(body, "body");
+    let reason = "";
+    if (body.reason !== undefined) {
+      if (typeof body.reason !== "string" || body.reason.length > 500) {
+        throw badRequest("reason must be a string of at most 500 characters.");
+      }
+      reason = body.reason;
+    }
+    return c.json(
+      await deps.projectConfigService.reportQualityFailure(
+        projectId,
+        ref.provider,
+        ref.modelId,
+        reason,
+      ),
+    );
+  });
+
+  // Forget health (owner): transport failures, quality bans, or both — one model (the
+  // pair goes together, like every model reference) or the whole Project. Answers how
+  // many rows it touched. Clearing failures never lifts bans and vice versa, the same
+  // split tracker's reset keeps.
+  app.delete("/health", async (c) => {
+    const projectId = requireValidId(c, "projectId");
+    deps.access.requireProjectOwner(c.var.user.userId, projectId);
+    const scope = c.req.query("scope") ?? "failures";
+    if (scope !== "failures" && scope !== "quality" && scope !== "all") {
+      throw badRequest('scope must be "failures", "quality" or "all".');
+    }
+    const provider = c.req.query("provider");
+    const modelId = c.req.query("modelId");
+    if (provider === undefined !== (modelId === undefined)) {
+      throw badRequest("provider and modelId go together or not at all.");
+    }
+    const ref =
+      provider !== undefined && modelId !== undefined
+        ? parseRef({ provider, modelId }, "query")
+        : undefined;
+    return c.json(
+      await deps.projectConfigService.clearModelHealth(
+        projectId,
+        scope,
+        ref?.provider,
+        ref?.modelId,
+      ),
+    );
   });
 
   // One group's connection (owner): `[providers.<id>]`'s base URL, protocol and key, merged

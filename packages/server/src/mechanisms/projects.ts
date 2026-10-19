@@ -13,6 +13,7 @@ import type {
   MemberInfo,
   ModelProtocolDetectRequest,
   ModelProtocolDetectResponse,
+  ModelHealthDto,
   ModelRefDto,
   ModelTestRequest,
   ModelTestResponse,
@@ -25,6 +26,7 @@ import type {
   ProjectRole,
   ProviderConnectionUpdate,
   ProjectSummary,
+  QualityReportResponse,
   ServerEvent,
 } from "../api/types.js";
 import type { UserRow } from "../db/repos/users.js";
@@ -134,6 +136,25 @@ export abstract class ProjectConfigStore {
   abstract getFallbackChain(projectId: string): Promise<ModelRefDto[]>;
   /** Replaces the fallback chain wholesale; an empty list clears the key. */
   abstract setFallbackChain(projectId: string, refs: ModelRefDto[]): Promise<ModelRefDto[]>;
+  /** Health memory rows of the Project, bans resolved at read time. */
+  abstract getModelHealth(projectId: string): Promise<ModelHealthDto[]>;
+  /** Records one manual quality failure; answers the count and whether the ban is now in force. */
+  abstract reportQualityFailure(
+    projectId: string,
+    provider: string,
+    modelId: string,
+    reason: string,
+  ): Promise<QualityReportResponse>;
+  /**
+   * Forgets health — transport failures, quality bans, or both — for one model or the
+   * whole Project. Answers how many rows it touched.
+   */
+  abstract clearModelHealth(
+    projectId: string,
+    scope: "failures" | "quality" | "all",
+    provider?: string,
+    modelId?: string,
+  ): Promise<{ cleared: number }>;
   abstract getChatDefaults(projectId: string): Promise<ChatDefaultsDto>;
   abstract setChatDefaults(projectId: string, req: ChatDefaultsDto): Promise<ChatDefaultsDto>;
   /** The `[plugins]` key: the shared table and each machine's own, package name → requirement, in the file's order. */
