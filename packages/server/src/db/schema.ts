@@ -60,6 +60,18 @@ CREATE TABLE IF NOT EXISTS run_outcomes ( -- One row per driven run: how it ende
 );
 CREATE INDEX IF NOT EXISTS idx_run_outcomes_session ON run_outcomes(project_id, agent_id, session_id, ended_at);`;
 
+export const SCHEDULE_FIRINGS_SQL = `
+CREATE TABLE IF NOT EXISTS schedule_firings ( -- One row per firing: which session a scheduled (or manual) fire went to and when. Joined with run_outcomes for the run-based autopilot rule (a firing's outcome is its session's earliest run started at/after the fire); a retention sweep is a follow-up.
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id TEXT NOT NULL,
+  agent_id   TEXT NOT NULL,
+  name       TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  fired_at   TEXT NOT NULL,
+  manual     INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_schedule_firings_task ON schedule_firings(project_id, agent_id, name, fired_at);`;
+
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS users (
   user_id             TEXT PRIMARY KEY,            -- semantic id doubles as login name: ^[a-z][a-z0-9_-]{1,31}$
@@ -100,6 +112,7 @@ ${MODEL_PROMOTIONS_SQL}
 ${MODEL_PROVIDER_AUTH_TOKENS_SQL}
 ${MODEL_HEALTH_SQL}
 ${RUN_OUTCOMES_SQL}
+${SCHEDULE_FIRINGS_SQL}
 CREATE TABLE IF NOT EXISTS agents (           -- index only; name/description live in system_config.yaml
   project_id TEXT NOT NULL,
   agent_id   TEXT NOT NULL,

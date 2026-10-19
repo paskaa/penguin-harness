@@ -143,6 +143,16 @@ export function isSettledStatus(status: ScheduleStatus): boolean {
 /** Consecutive firing failures that stop the ticks until a resume (or a file edit). */
 export const SCHEDULE_AUTOPAUSE_THRESHOLD = 3;
 
+/**
+ * Run-based autopilot rule (Multica-caliber, scaled to our volumes — Multica watches
+ * 50 runs at 90%; our schedules fire far less): trailing 7 days with at least 10
+ * decided runs (aborted runs are user stops, not signal) and a failure rate at or
+ * above 80% stops the ticks until a resume. Manual firings never count.
+ */
+export const SCHEDULE_RUN_RULE_MIN_RUNS = 10;
+export const SCHEDULE_RUN_RULE_FAIL_RATE = 0.8;
+export const SCHEDULE_RUN_RULE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
 /** In-memory view of a registered task (definition + run state + queued flag). */
 export interface ScheduleEntryView {
   def: ScheduleDefinition;
@@ -478,12 +488,46 @@ export class Scheduler implements Scheduling {
     if (!def.enabled || state.invalidReason !== null || state.autoPausedAt !== null) return;
     if (def.periodMs === undefined && (state.firedOnce || state.missed)) return;
     const nowMs = this.now();
+    // Run-based autopilot rule, ahead of the slot: a schedule whose recent runs keep
+    // failing stops here instead of firing once more into the same wall.
+    if (this.maybePauseOnRunFailures(projectId, agentId, def, state, nowMs)) return;
     const slot = latestSlotAt(def, nowMs);
     if (slot === null || !slotInWindow(def, slot)) return;
     if (state.lastSlotMs !== null && slot <= state.lastSlotMs) return;
     // Consume this slot: never retry the same slot whether the send then succeeds, queues, or fails (the twin rule of no-backfill).
     this.repo.markSlot(projectId, agentId, def.name, slot);
     await this.dispatch(projectId, agentId, def, state);
+  }
+
+  /**
+   * Run-based autopilot rule: trailing-window decided runs at or above the failure
+   * rate stop the ticks until a resume (the creator hears why). Answers whether it
+   * paused. Aborted runs are user stops, not signal; firings with no run yet wait.
+   */
+  private maybePauseOnRunFailures(
+    projectId: string,
+    agentId: string,
+    def: ScheduleDefinition,
+    state: ScheduleStateRow,
+    nowMs: number,
+  ): boolean {
+    const sinceIso = new Date(nowMs - SCHEDULE_RUN_RULE_WINDOW_MS).toISOString();
+    const outcomes = this.repo.firingOutcomes(projectId, agentId, def.name, sinceIso);
+    const decided = outcomes.filter((o) => o !== "aborted");
+    if (decided.length < SCHEDULE_RUN_RULE_MIN_RUNS) return false;
+    const failed = decided.filter((o) => o === "failed").length;
+    if (failed / decided.length < SCHEDULE_RUN_RULE_FAIL_RATE) return false;
+    const at = new Date(nowMs).toISOString();
+    this.repo.autoPause(projectId, agentId, def.name, "schedule_run_failed", at);
+    this.notifyFor(state, {
+      type: "schedule_auto_paused",
+      projectId,
+      agentId,
+      name: def.name,
+      reason: "schedule_run_failed",
+      failures: failed,
+    });
+    return true;
   }
 
   /**
@@ -626,6 +670,7 @@ export class Scheduler implements Scheduling {
       def.periodMs === undefined && !(opts.manual ?? false),
     );
     this.repo.noteFiringSuccess(projectId, agentId, def.name);
+    this.repo.recordFiring(projectId, agentId, def.name, sessionId, firedAt, opts.manual ?? false);
     // A one-shot is settled the moment it fires (as is a periodic task whose last fire went out
     // after end_at): archive it before the event, or the refetch the event triggers would still
     // list it as done.

@@ -19,6 +19,7 @@ import {
 import { openDatabase } from "../src/db/database.js";
 import { ProjectsRepo } from "../src/db/repos/projects.js";
 import { SchedulesRepo } from "../src/db/repos/schedules.js";
+import { RunOutcomesRepo } from "../src/db/repos/run-outcomes.js";
 import { SessionsRepo } from "../src/db/repos/sessions.js";
 import { UsersRepo } from "../src/db/repos/users.js";
 import type { ErrorRecordArgs } from "../src/runtime/error-recorder.js";
@@ -689,5 +690,80 @@ describe("scheduler", () => {
         T0,
       ),
     ).toBe("invalid");
+  });
+
+  it("run-based rule: 10 failed runs in 7 days pauses the ticks and notifies", async () => {
+    await writeFile("flaky-runs", [
+      `prompt = "flaky"`,
+      `enabled = true`,
+      `start_at = "${iso(T0)}"`,
+      `period = "5m"`,
+    ]);
+    nowMs = T0;
+    await scheduler.tickOnce(); // Registration.
+    const outcomes = new RunOutcomesRepo(db);
+    for (let i = 0; i < 10; i++) {
+      const firedAt = iso(T0 - (i + 1) * 60 * MIN);
+      const sessionId = `session-past-${i}`;
+      repo.recordFiring(P, A, "flaky-runs", sessionId, firedAt, false);
+      outcomes.record({
+        projectId: P,
+        agentId: A,
+        sessionId,
+        startedAt: firedAt,
+        endedAt: iso(Date.parse(firedAt) + 1000),
+        outcome: "failed",
+        errorCode: "llm_fatal",
+      });
+    }
+    nowMs = T0 + 5 * MIN;
+    await scheduler.tickOnce();
+    expect(repo.find(P, A, "flaky-runs")?.autoPausedAt).not.toBeNull();
+    expect(repo.find(P, A, "flaky-runs")?.autoPauseReason).toBe("schedule_run_failed");
+    expect(events.filter((e) => e.event.type === "schedule_auto_paused")).toHaveLength(1);
+    expect(started).toHaveLength(0);
+  });
+
+  it("run-based rule: aborted runs and old failures are not signal", async () => {
+    await writeFile("aborted-runs", [
+      `prompt = "aborted"`,
+      `enabled = true`,
+      `start_at = "${iso(T0)}"`,
+      `period = "5m"`,
+    ]);
+    nowMs = T0;
+    await scheduler.tickOnce();
+    const outcomes = new RunOutcomesRepo(db);
+    for (let i = 0; i < 10; i++) {
+      const firedAt = iso(T0 - (i + 1) * 60 * MIN);
+      const sessionId = `session-aborted-${i}`;
+      repo.recordFiring(P, A, "aborted-runs", sessionId, firedAt, false);
+      outcomes.record({
+        projectId: P,
+        agentId: A,
+        sessionId,
+        startedAt: firedAt,
+        endedAt: iso(Date.parse(firedAt) + 1000),
+        outcome: "aborted",
+      });
+    }
+    // Nine failures are below the bar even with an abort on top.
+    for (let i = 0; i < 9; i++) {
+      const firedAt = iso(T0 - (i + 1) * 60 * MIN);
+      const sessionId = `session-few-${i}`;
+      repo.recordFiring(P, A, "aborted-runs", sessionId, firedAt, false);
+      outcomes.record({
+        projectId: P,
+        agentId: A,
+        sessionId,
+        startedAt: firedAt,
+        endedAt: iso(Date.parse(firedAt) + 1000),
+        outcome: i === 0 ? "completed" : "failed",
+      });
+    }
+    nowMs = T0 + 5 * MIN;
+    await scheduler.tickOnce();
+    expect(repo.find(P, A, "aborted-runs")?.autoPausedAt).toBeNull();
+    expect(started).toHaveLength(1);
   });
 });

@@ -127,6 +127,25 @@ export abstract class Schedules {
   ): void;
   /** Lifts an auto-pause and forgets the count behind it. */
   abstract clearAutoPause(projectId: string, agentId: string, name: string): void;
+  /** Links one firing to the session it went to (scheduled and manual alike). */
+  abstract recordFiring(
+    projectId: string,
+    agentId: string,
+    name: string,
+    sessionId: string,
+    firedAt: string,
+    manual: boolean,
+  ): void;
+  /**
+   * One outcome per scheduled firing since `sinceIso`, oldest first (manual firings
+   * never count; firings with no run yet read as nothing).
+   */
+  abstract firingOutcomes(
+    projectId: string,
+    agentId: string,
+    name: string,
+    sinceIso: string,
+  ): Array<"completed" | "failed" | "aborted">;
   abstract delete(projectId: string, agentId: string, name: string): void;
   abstract deleteMissing(projectId: string, agentId: string, presentNames: string[]): string[];
   abstract deleteByAgent(projectId: string, agentId: string): void;

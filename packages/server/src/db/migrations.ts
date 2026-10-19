@@ -750,6 +750,32 @@ export const MIGRATIONS: readonly Migration[] = [
       db.exec("DROP TABLE IF EXISTS run_outcomes");
     },
   },
+  {
+    version: 22,
+    name: "schedule-firings",
+    // Additive: one new table (+index). Firing→session links; a predecessor build
+    // never reads them and fires fine without recording, so a rollback survives it.
+    swapSafe: true,
+    up(db) {
+      // Frozen copy of the DDL as of the run-based autopilot rule; do not re-derive from schema.ts.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS schedule_firings ( -- One row per firing: which session a scheduled (or manual) fire went to and when. Joined with run_outcomes for the run-based autopilot rule (a firing's outcome is its session's earliest run started at/after the fire); a retention sweep is a follow-up.
+          id         INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_id TEXT NOT NULL,
+          agent_id   TEXT NOT NULL,
+          name       TEXT NOT NULL,
+          session_id TEXT NOT NULL,
+          fired_at   TEXT NOT NULL,
+          manual     INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_schedule_firings_task ON schedule_firings(project_id, agent_id, name, fired_at);
+      `);
+    },
+    // LOSES firing links: the run-based rule re-learns from the next firings.
+    down(db) {
+      db.exec("DROP TABLE IF EXISTS schedule_firings");
+    },
+  },
 ];
 
 /** The highest version this build knows how to reach. */
