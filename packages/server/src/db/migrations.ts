@@ -723,6 +723,33 @@ export const MIGRATIONS: readonly Migration[] = [
     // Keep the learned counts on rollback; older builds ignore the columns.
     down() {},
   },
+  {
+    version: 21,
+    name: "run-outcomes",
+    // Additive: one new table (+index). Per-run outcomes; a predecessor build never
+    // reads it and runs fine without recording, so a rollback survives it.
+    swapSafe: true,
+    up(db) {
+      // Frozen copy of the DDL as of the run-outcomes landing; do not re-derive from schema.ts.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS run_outcomes ( -- One row per driven run: how it ended (completed | failed | aborted) and the failure code. The substrate run-based coordination reads (autopilot run-failure rules, leader re-evaluation); a retention sweep is a follow-up, the rows are small.
+          id         INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_id TEXT NOT NULL,
+          agent_id   TEXT NOT NULL,
+          session_id TEXT NOT NULL,
+          started_at TEXT NOT NULL,
+          ended_at   TEXT NOT NULL,
+          outcome    TEXT NOT NULL,
+          error_code TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_run_outcomes_session ON run_outcomes(project_id, agent_id, session_id, ended_at);
+      `);
+    },
+    // LOSES the recorded run outcomes: run-based rules re-learn from the next runs.
+    down(db) {
+      db.exec("DROP TABLE IF EXISTS run_outcomes");
+    },
+  },
 ];
 
 /** The highest version this build knows how to reach. */

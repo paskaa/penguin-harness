@@ -47,6 +47,19 @@ CREATE TABLE IF NOT EXISTS model_health ( -- Per-Project per-model health memory
   PRIMARY KEY (project_id, provider, model_id)
 );`;
 
+export const RUN_OUTCOMES_SQL = `
+CREATE TABLE IF NOT EXISTS run_outcomes ( -- One row per driven run: how it ended (completed | failed | aborted) and the failure code. The substrate run-based coordination reads (autopilot run-failure rules, leader re-evaluation); a retention sweep is a follow-up, the rows are small.
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id TEXT NOT NULL,
+  agent_id   TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  ended_at   TEXT NOT NULL,
+  outcome    TEXT NOT NULL,
+  error_code TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_run_outcomes_session ON run_outcomes(project_id, agent_id, session_id, ended_at);`;
+
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS users (
   user_id             TEXT PRIMARY KEY,            -- semantic id doubles as login name: ^[a-z][a-z0-9_-]{1,31}$
@@ -86,6 +99,7 @@ CREATE TABLE IF NOT EXISTS project_members (  -- member grants only; owners are 
 ${MODEL_PROMOTIONS_SQL}
 ${MODEL_PROVIDER_AUTH_TOKENS_SQL}
 ${MODEL_HEALTH_SQL}
+${RUN_OUTCOMES_SQL}
 CREATE TABLE IF NOT EXISTS agents (           -- index only; name/description live in system_config.yaml
   project_id TEXT NOT NULL,
   agent_id   TEXT NOT NULL,

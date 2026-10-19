@@ -107,6 +107,7 @@ import type { SandboxService } from "../sandbox/service.js";
 import type { DatabaseSync } from "node:sqlite";
 import type { AuthState, Channels, Clock, Config, Db, Log } from "../hmr/capabilities.js";
 import { ModelHealthRepo } from "../db/repos/model-health.js";
+import { RunOutcomesRepo } from "../db/repos/run-outcomes.js";
 import type { ProjectConfigStore, ProjectEvents } from "../mechanisms/projects.js";
 import type { AgentState, SessionIndex, SessionOrigins } from "../mechanisms/sessions.js";
 import type { Errors, UsageRecording } from "../mechanisms/observability.js";
@@ -476,6 +477,22 @@ export interface ModelHealthMemory {
   ): void;
 }
 
+/**
+ * The slice of the run-outcome memory the drive path needs. `RunOutcomesRepo`
+ * implements it structurally; tests fake it.
+ */
+export interface RunOutcomesMemory {
+  record(args: {
+    projectId: string;
+    agentId: string;
+    sessionId: string;
+    startedAt: string;
+    endedAt: string;
+    outcome: "completed" | "failed" | "aborted";
+    errorCode?: string;
+  }): void;
+}
+
 export interface SessionManagerDeps {
   /** The in-memory state this manager works on (see agent-state.ts). Optional: a manager built without one — unit tests — gets an empty state of its own. */
   state?: AgentState;
@@ -529,6 +546,12 @@ export interface SessionManagerDeps {
    * and assemblies that predate it get.
    */
   modelHealth?: ModelHealthMemory;
+  /**
+   * Per-run outcome memory (see db/repos/run-outcomes.ts): how each drive ended
+   * (switches excluded — moves, not runs). Absent = no records, which is what unit
+   * tests and assemblies that predate it get.
+   */
+  runOutcomes?: RunOutcomesMemory;
   /**
    */
 }
@@ -1591,7 +1614,7 @@ export class SessionManager {
     entry.abort = ac;
     this.publishState(entry, "running");
     const gen = entry.session.switchModel({ ...target, signal: ac.signal });
-    entry.running = this.drive(entry, gen);
+    entry.running = this.drive(entry, gen, undefined, { recordOutcome: false });
     await entry.running;
     // The entry follows the runtime it just moved onto (the manual switch does the same):
     // without this, usage — and the health memory's noting — keeps attributing to the model
@@ -1720,7 +1743,7 @@ export class SessionManager {
         if (first.done) return settled();
         entry.status = "compacting";
         this.publishState(entry, "compacting");
-        return this.drive(entry, resumeFrom(first.value, gen));
+        return this.drive(entry, resumeFrom(first.value, gen), undefined, { recordOutcome: false });
       }, settled);
       let first: IteratorResult<OmniMessage, StopReason>;
       try {
@@ -2415,6 +2438,7 @@ export class SessionManager {
     entry: RuntimeEntry,
     gen: AsyncGenerator<OmniMessage>,
     titleSource?: { userExcerpt: string },
+    opts: { recordOutcome?: boolean } = {},
   ): Promise<void> {
     const ctx: UsageContext = {
       projectId: entry.projectId,
@@ -2423,6 +2447,10 @@ export class SessionManager {
       provider: entry.provider,
       modelId: entry.modelId,
     };
+    const runStartedAt =
+      this.deps.runOutcomes === undefined
+        ? ""
+        : (this.deps.now?.() ?? new Date()).toISOString();
     // Title policy fires at run start, from the user input alone: the generator persists
     // the input's first words as an immediate fallback and issues the LLM replacement
     // request without waiting for any model output (maybeGenerate self-guards: manual
@@ -2607,6 +2635,31 @@ export class SessionManager {
     } finally {
       // Wrap-up: persist any still-pending LLM failure and clear the tool-name cache (the watcher's state doesn't carry across runs).
       watcher?.close();
+      // Run outcome: aborted (a stop landed, whoever called it — a shutdown-cut run
+      // resumes and records its own fresh outcome, so no special case), failed (the
+      // watcher saw terminal failure), or completed. Guarded: recording must never
+      // break the idle flip below.
+      if (opts.recordOutcome !== false && this.deps.runOutcomes !== undefined) {
+        const aborted = entry.abort?.signal.aborted === true;
+        const failed = watcher?.failed === true;
+        try {
+          this.deps.runOutcomes.record({
+            projectId: entry.projectId,
+            agentId: entry.agentId,
+            sessionId: entry.sessionId,
+            startedAt: runStartedAt,
+            endedAt: (this.deps.now?.() ?? new Date()).toISOString(),
+            outcome: aborted ? "aborted" : failed ? "failed" : "completed",
+            ...(failed && watcher?.failureCode !== undefined
+              ? { errorCode: watcher.failureCode }
+              : {}),
+          });
+        } catch (err) {
+          this.log(
+            `[run-outcomes] record failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
       // The run is over: no fragment will ever continue, so drop the live tail before the
       // idle flip (GET /messages stops attaching `live` the moment status reads idle).
       this.liveTail.clear(entry.sessionId);
@@ -3136,6 +3189,21 @@ export class SessionsModule {
             errorCode: string | undefined,
             nowIso: string,
           ) => repo.noteRequestEnd(projectId, provider, modelId, errorCode, nowIso),
+        };
+      })(),
+      // Run outcomes (one row per drive): same sync repo, same closure shape.
+      runOutcomes: (() => {
+        const repo = new RunOutcomesRepo(this.db as unknown as DatabaseSync);
+        return {
+          record: (args: {
+            projectId: string;
+            agentId: string;
+            sessionId: string;
+            startedAt: string;
+            endedAt: string;
+            outcome: "completed" | "failed" | "aborted";
+            errorCode?: string;
+          }) => repo.record(args),
         };
       })(),
       now: () => this.clock.now(),

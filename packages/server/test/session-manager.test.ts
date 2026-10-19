@@ -85,7 +85,7 @@ import type { ChannelEvent } from "../src/runtime/channel.js";
 import type { ErrorRecordArgs, ErrorSink } from "../src/runtime/error-recorder.js";
 import { SessionManager, FOLLOW_UP_QUEUE_LIMIT } from "../src/runtime/session-manager.js";
 import type { RuntimeSession, SessionLoader } from "../src/runtime/session-manager.js";
-import type { ModelHealthMemory } from "../src/runtime/session-manager.js";
+import type { ModelHealthMemory, RunOutcomesMemory } from "../src/runtime/session-manager.js";
 import { createFileRunMarkStore } from "../src/runtime/run-marks.js";
 import type { RunMarkStore } from "../src/runtime/run-marks.js";
 import { SessionSources } from "../src/runtime/session-sources.js";
@@ -190,6 +190,8 @@ describe("session-manager", () => {
     runMarks?: RunMarkStore,
     /** Health memory fake, for the failover skip tests (absent everywhere else). */
     modelHealth?: ModelHealthMemory,
+    /** Outcome memory fake, for the run-outcome tests (absent everywhere else). */
+    runOutcomes?: RunOutcomesMemory,
   ): SessionManager =>
     new SessionManager({
       sessions,
@@ -198,6 +200,7 @@ describe("session-manager", () => {
       loader,
       ...(fallbackChainOf ? { fallbackChainOf } : {}),
       ...(modelHealth ? { modelHealth } : {}),
+      ...(runOutcomes ? { runOutcomes } : {}),
       recorder: {
         record: async (ctx, msg) => {
           recordedCtx.push(ctx);
@@ -1963,5 +1966,76 @@ describe("session-manager", () => {
       { projectId: "p1", provider: "custom", modelId: "m-alpha", errorCode: "rate_limited" },
       { projectId: "p1", provider: "custom", modelId: "m-beta", errorCode: undefined },
     ]);
+  });
+
+  it("records completed for a run that answers", async () => {
+    const recorded: Array<{ outcome: string; errorCode?: string }> = [];
+    const fake = {
+      sessionId: "session-1",
+      provider: "custom",
+      modelId: "m1",
+      toolPermission: () => "rw" as const,
+      generateTitle: async () => ({ title: null, usage: null }),
+      compactability: () => "ok" as const,
+      steer: () => false,
+      skipReconnectWait: () => false,
+      async *run(): AsyncGenerator<OmniMessage> {
+        yield requestBegin();
+        yield assistantText("done");
+        yield requestEnd("completed");
+      },
+      async *compact(): AsyncGenerator<OmniMessage> {},
+    } as unknown as RuntimeSession;
+    const manager = makeManager(loaderOf(fake), undefined, undefined, undefined, undefined, undefined, {
+      record: (args) => void recorded.push({ outcome: args.outcome, errorCode: args.errorCode }),
+    });
+
+    await manager.startTask("session-1", [userText("hi")]);
+    await waitFor(() => manager.statusOf("session-1") === "idle");
+    await waitFor(() => recorded.length === 1);
+    expect(recorded).toEqual([{ outcome: "completed", errorCode: undefined }]);
+  });
+
+  it("records aborted for a run the person stops", async () => {
+    sessions.updateApprovalMode("session-1", "always-ask");
+    const recorded: Array<{ outcome: string }> = [];
+    const manager = makeManager(loaderOf(approvalFakeSession("session-1")), undefined, undefined, undefined, undefined, undefined, {
+      record: (args) => void recorded.push({ outcome: args.outcome }),
+    });
+
+    await manager.startTask("session-1", [userText("do it")]);
+    await waitFor(() => manager.pendingApprovalCount("session-1") === 1);
+    manager.abortTask("session-1");
+    await waitFor(() => manager.statusOf("session-1") === "idle");
+    await waitFor(() => recorded.length === 1);
+    expect(recorded).toEqual([{ outcome: "aborted" }]);
+  });
+
+  it("records failed with the code when the stream ends fatal", async () => {
+    const recorded: Array<{ outcome: string; errorCode?: string }> = [];
+    const fake = {
+      sessionId: "session-1",
+      provider: "custom",
+      modelId: "m1",
+      toolPermission: () => "rw" as const,
+      generateTitle: async () => ({ title: null, usage: null }),
+      compactability: () => "ok" as const,
+      steer: () => false,
+      skipReconnectWait: () => false,
+      async *run(): AsyncGenerator<OmniMessage> {
+        yield requestBegin();
+        yield requestEnd("fatal", { errorCode: "auth", errorMessage: "bad key" });
+      },
+      async *compact(): AsyncGenerator<OmniMessage> {},
+    } as unknown as RuntimeSession;
+    const manager = makeManager(loaderOf(fake), { record: () => {} }, undefined, undefined, undefined, undefined, {
+      record: (args) => void recorded.push({ outcome: args.outcome, errorCode: args.errorCode }),
+    });
+
+    await manager.startTask("session-1", [userText("hi")]);
+    await waitFor(() => manager.statusOf("session-1") === "idle");
+    await waitFor(() => recorded.length === 1);
+    expect(recorded[0]?.outcome).toBe("failed");
+    expect(recorded[0]?.errorCode).toBe("llm_fatal");
   });
 });

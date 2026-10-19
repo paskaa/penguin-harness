@@ -35,6 +35,7 @@ import type {
   SessionCategory,
   SessionCategoryCounts,
   SessionInfo,
+  SessionRunItem,
   SessionSandbox,
   SessionSandboxPreset,
   SessionSource,
@@ -218,6 +219,20 @@ export interface SessionServiceDeps {
   sessions: SessionIndex;
   manager: SessionManager;
   projectConfig: ProjectConfigStore;
+  /** Run-outcome reads; absent in narrow tests (reads answer empty). */
+  runOutcomes?: {
+    recentBySession(
+      projectId: string,
+      agentId: string,
+      sessionId: string,
+      limit: number,
+    ): Array<{
+      startedAt: string;
+      endedAt: string;
+      outcome: "completed" | "failed" | "aborted";
+      errorCode: string | null;
+    }>;
+  };
   /** In-process origin registry derived from session_meta (the DB stores no source column). */
   sources: SessionOrigins;
   /** Trace-file index: discovery / adoption / stats serve from it (mtime-gated reconciler; no per-request walks). */
@@ -462,6 +477,19 @@ export class SessionService {
   /** Whether this Session already has a Trace record (a Task has been run): answered by the index (reconciled first). */
   async hasTrace(row: SessionRow): Promise<boolean> {
     return (await this.discoverTraces(row.projectId, row.agentId)).has(row.sessionId);
+  }
+
+  /** A session's recent runs, newest first (empty without the outcome memory). */
+  async sessionRuns(row: SessionRow, limit: number): Promise<SessionRunItem[]> {
+    const rows =
+      this.deps.runOutcomes?.recentBySession(row.projectId, row.agentId, row.sessionId, limit) ??
+      [];
+    return rows.map((r) => ({
+      startedAt: r.startedAt,
+      endedAt: r.endedAt,
+      outcome: r.outcome,
+      ...(r.errorCode !== null ? { errorCode: r.errorCode } : {}),
+    }));
   }
 
   /**

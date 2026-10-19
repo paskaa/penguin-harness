@@ -2514,6 +2514,19 @@ export interface SessionResponse {
   session: SessionInfo;
 }
 
+/** One driven run's outcome: how it ended, and the failure code when it failed. */
+export interface SessionRunItem {
+  startedAt: string;
+  endedAt: string;
+  outcome: "completed" | "failed" | "aborted";
+  errorCode?: string;
+}
+
+/** A session's recent runs, newest first. */
+export interface SessionRunsResponse {
+  runs: SessionRunItem[];
+}
+
 export interface SessionPatchRequest {
   approvalMode?: ApprovalMode;
   /**

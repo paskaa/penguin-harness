@@ -37,6 +37,7 @@ import type {
   SessionForkResponse,
   SessionProcessesResponse,
   SessionResponse,
+  SessionRunsResponse,
   SessionsResponse,
   SessionsBatchResponse,
   SubagentMessageResponse,
@@ -922,6 +923,20 @@ export function sessionsRoutes(deps: SessionsRouteDeps): Hono<AppEnv> {
     return c.json({
       session: { ...info, ...(tracePath !== undefined ? { tracePath } : {}) },
     } satisfies SessionResponse);
+  });
+
+  // Recent runs, newest first: how each drive ended (completed | failed | aborted).
+  // The substrate run-based coordination reads; `limit` caps the lookback.
+  app.get("/:sessionId/runs", async (c) => {
+    const row = resolveSession(c);
+    const rawLimit = c.req.query("limit");
+    const limit =
+      rawLimit === undefined ? 20 : Number.parseInt(rawLimit, 10);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+      throw badRequest("limit must be an integer between 1 and 200.");
+    }
+    const runs = await deps.sessionService.sessionRuns(row, limit);
+    return c.json({ runs } satisfies SessionRunsResponse);
   });
 
   app.patch("/:sessionId", async (c) => {
