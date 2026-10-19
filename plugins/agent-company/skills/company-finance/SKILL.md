@@ -37,7 +37,7 @@ penguin org employee set <org_id>_dev --budget 200       # inside the CEO's; the
 The CEO hires finance at initialization, before there is a budget tree. On your first work run:
 
 1. Read `org_config.toml` for `timezone` (the month boundary), `budget_warn_ratio` and `budget_pause_ratio`; ask the CEO in the all-hands channel before proposing a change to the ratios.
-2. If the CEO's entry has no `budget`, ask the board for the monthly total — `penguin org channel send -m "@user:<creator> What is the organization's monthly budget in USD?"` (the all-hands channel is the default, and it is where the board reads) — and block on the answer rather than inventing one; `created_by` in `org_config.toml` names the creator.
+2. If the CEO's entry has no `budget`, ask the board for the monthly total — `penguin org channel send -m "[@creator](mention://user/<creator>) What is the organization's monthly budget in USD?"` (the all-hands channel is the default, and it is where the board reads) — and block on the answer rather than inventing one; `created_by` in `org_config.toml` names the creator.
 3. Set the tree top-down (above), leaving each superior its reserve.
 4. Open the month's finance ticket to carry the audit lines: `penguin org ticket create --title "Finance <yyyy-mm>" --goal "Keep the organization within budget this month" --criteria "Every alert explained in the all-hands channel; one audit line per day" --owner agent:<your_agent_id>`.
 5. Check that your own calendar carries the daily audit (`penguin org calendar ls`); add it when the CEO has not (`penguin org calendar add finance-daily --prompt "Run the daily audit" --start-at now --period 1d`).
@@ -58,7 +58,7 @@ Read, in order: anyone paused; anyone above the warn ratio; spend against days e
 A budget alert is a system message: it triggers nobody, so finance reads it in the audit and answers it. Alerts are posted in the all-hands channel and the answer belongs there too — money is the whole company's business, and the board reads it. One message, @-mentioning the employee's superior (and the employee when it can act on the advice), with the number, the cause and a proposal:
 
 ```bash
-penguin org channel send -m "@acme_ceo acme_dev is at 85% (170/200 USD) on day 12: three ticket sessions per day on 2026-09-01-site-build. Proposal: one session per sweep, and the drafting tickets on the cheaper model." --ref-ticket 2026-09-01-site-build
+penguin org channel send -m "[@acme_ceo](mention://agent/acme_ceo) acme_dev is at 85% (170/200 USD) on day 12: three ticket sessions per day on 2026-09-01-site-build. Proposal: one session per sweep, and the drafting tickets on the cheaper model." --ref-ticket 2026-09-01-site-build
 ```
 
 Take a detail that only one stream needs into that stream's channel instead — but the alert itself is always answered where it was posted.

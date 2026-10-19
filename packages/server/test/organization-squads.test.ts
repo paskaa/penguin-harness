@@ -99,7 +99,7 @@ describe("squads", () => {
     expect(devDesks).toHaveLength(1);
     const body = devDesks[0]!.text;
     expect(body).toContain("Squad operating protocol");
-    expect(body).toContain(`@agent:${QA}`);
+    expect(body).toContain(`[@${QA}](mention://agent/${QA})`);
     expect(body).toContain("regression");
     expect(body).toContain("DB changes go past QA first.");
     expect(body).toContain("Ship it");
@@ -202,25 +202,25 @@ describe("squads", () => {
     // An explicit @ is the routing signal: the mention sweep delivers it, no re-trigger.
     const addressed = h.started.length;
     await h.service.sendChannelMessage(P, ORG, "alice", DEFAULT_CHANNEL_ID, {
-      text: `@${QA} take the next step`,
+      text: `[@${QA}](mention://agent/${QA}) take the next step`,
       refs: { ticket: t.ticketId },
     });
     const fresh = h.started.slice(addressed);
     expect(fresh.every((s) => s.sessionId !== devDesk)).toBe(true);
   });
 
-  it("@squad wakes the leader for that comment only, when the leader sits in the channel", async () => {
+  it("a [@squad:delivery](mention://squad/delivery) mention wakes the leader for that comment only, when the leader sits in the channel", async () => {
     await h.service.createSquad(P, ORG, { id: "delivery", name: "Delivery", leader: DEV });
     const before = h.started.length;
     await h.service.sendChannelMessage(P, ORG, "alice", DEFAULT_CHANNEL_ID, {
-      text: "@squad:delivery who takes the deploy?",
+      text: "[@squad:delivery](mention://squad/delivery) who takes the deploy?",
     });
     const fresh = h.started.slice(before);
     expect(fresh).toHaveLength(1);
     expect(parseOrgTriggerMessage(fresh[0]!.text)?.origin.kind).toBe("mention");
     // Unknown squads read as text; a leader outside the channel cannot be @'d through it.
     await h.service.sendChannelMessage(P, ORG, "alice", DEFAULT_CHANNEL_ID, {
-      text: "@squad:ghost hello?",
+      text: "[@squad:ghost](mention://squad/ghost) hello?",
     });
     expect(h.started).toHaveLength(before + 1);
     await h.service.createChannel(
@@ -231,7 +231,7 @@ describe("squads", () => {
     );
     await h.service.addChannelMember(P, ORG, "small", `agent:${QA}`, { userId: "alice" });
     await expect(
-      h.service.sendChannelMessage(P, ORG, "alice", "small", { text: "@squad:delivery hi" }),
+      h.service.sendChannelMessage(P, ORG, "alice", "small", { text: "[@squad:delivery](mention://squad/delivery) hi" }),
     ).rejects.toMatchObject({ status: 400, code: "mention_not_member" });
   });
 });

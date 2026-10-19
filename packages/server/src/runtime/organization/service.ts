@@ -130,7 +130,6 @@ import { loadOrg, orgEmployeeNames, projectUserIds, sharedWorkspace } from "./mo
 import type { LoadedOrg } from "./model.js";
 import { parseAvatarDataUrl, readAvatar, writeAvatar } from "../../organization/avatars.js";
 import { employeeNameProblem, findMentions } from "../../organization/names.js";
-import type { MentionHandle } from "../../organization/names.js";
 import {
   channelArchiveChanged,
   channelCreated,
@@ -2864,34 +2863,21 @@ export class OrganizationService {
   }
 
   /**
-   * Whom a message addresses (organization/names.ts): an employee by id or by name, a Project
-   * member by user id, `all` — an id before a name, an employee before a member of the same
-   * id — and the explicit `@agent:<id>` / `@user:<id>` / `@squad:<id>` for a writer who has
-   * to say which (a squad mention resolves only while the squad is live).
+   * Whom a message addresses (organization/names.ts): only the exact markdown forms
+   * `[@Label](mention://agent|user|squad/<id>)` and `[@All](mention://all)` — a bare
+   * `@name`, `@id`, `@all` or `@agent:<id>` in prose pages nobody. The kind/id pair
+   * still validates against the live organization (a squad mention resolves only while
+   * the squad is live); the label is display only.
    */
   private async resolveMentions(
     org: LoadedOrg,
     text: string,
   ): Promise<{ mentions: string[]; squads: Squads }> {
     const users = new Set(this.projectUserIds(org));
-    const names = await orgEmployeeNames(this.deps, org);
     const squadsFile = await this.deps.store.readSquads(org.dir);
     const squads = squadsFile.parsed.ok ? squadsFile.parsed.value : {};
-    // Listed in order of precedence: of two handles of one length, the first one wins.
-    const handles: MentionHandle[] = [
-      { handle: "all", principal: "all" },
-      ...org.chart.employees.map((e) => ({
-        handle: e.agentId,
-        principal: agentPrincipal(e.agentId),
-      })),
-      ...org.chart.employees.map((e) => ({
-        handle: names.get(e.agentId) ?? e.agentId,
-        principal: agentPrincipal(e.agentId),
-      })),
-      ...[...users].map((id) => ({ handle: id, principal: userPrincipal(id) })),
-    ];
     const out: string[] = [];
-    const found = findMentions(text, handles, (kind, id) => {
+    const found = findMentions(text, (kind, id) => {
       if (kind === "squad") {
         const squad = squads[id];
         // Only a live squad is mentionable; archived or unknown reads as text.
@@ -3160,9 +3146,18 @@ export function squadDispatchBody(
     if (agentId !== null) return org.byId.get(agentId)?.name ?? agentId;
     return principal.startsWith("user:") ? principal.slice("user:".length) : principal;
   };
+  // The exact mention to paste per member: markdown, since bare @text never triggers.
+  // Labels stay link-safe (names may hold spaces and any script, but not brackets).
+  const mentionOf = (principal: string): string => {
+    const label = displayName(principal).replace(/[\[\]]/g, "").trim() || principal;
+    const agentId = principalAgentId(principal);
+    if (agentId !== null) return `[@${label}](mention://agent/${agentId})`;
+    if (principal.startsWith("user:")) return `[@${label}](mention://user/${principal.slice("user:".length)})`;
+    return principal;
+  };
   const roster = squad.members.map((m) => {
     const role = squad.roles[m];
-    const who = `${displayName(m)} (@${m})`;
+    const who = `${displayName(m)} (${mentionOf(m)})`;
     return role !== undefined ? `- ${who}：${role}` : `- ${who}`;
   });
   const ticket = [
@@ -3178,7 +3173,7 @@ export function squadDispatchBody(
     return [
       `工单 ${ticketId} 指派给了 squad「${squad.name}」，你是它的 leader。`,
       "",
-      "Squad 协作协议（照做，不要发挥）：读工单，把下一步派给最合适的成员——在工单频道里发一条 @-mention 对方的消息（@ 写法照花名册一字不差地抄；正文只写下一步是什么，不要复述工单全文，对方看得见）。派完即停，不要自己实现。父工单保持 in_progress；只有整体目标达成才移到 review；done 由人来关。",
+      "Squad 协作协议（照做，不要发挥）：读工单，把下一步派给最合适的成员——在工单频道里发一条 @-mention 对方的消息（@ 写法照花名册括号里的链接一字不差地抄，方括号圆括号都要；纯文本 @ 不触发，人名裸写等于没 @）。正文只写下一步是什么，不要复述工单全文，对方看得见。派完即停，不要自己实现。父工单保持 in_progress；只有整体目标达成才移到 review；done 由人来关。",
       "",
       "花名册：",
       ...roster,
@@ -3191,7 +3186,7 @@ export function squadDispatchBody(
   return [
     `Ticket ${ticketId} was assigned to squad "${squad.name}", and you are its leader.`,
     "",
-    "Squad operating protocol (follow it, do not improvise): read the ticket, hand the next step to the best-suited member — post an @-mention of them in the ticket channel (copy the @ handle from the roster exactly; say only what the next step is, never restate the ticket, they can read it). Stop after dispatching; do not implement it yourself. The parent stays in_progress; move it to review only once the overall goal is met; a human closes it to done.",
+    "Squad operating protocol (follow it, do not improvise): read the ticket, hand the next step to the best-suited member — post an @-mention of them in the ticket channel (copy the bracketed mention link from the roster exactly, brackets and parens included; a bare @handle in prose triggers nothing; say only what the next step is, never restate the ticket, they can read it). Stop after dispatching; do not implement it yourself. The parent stays in_progress; move it to review only once the overall goal is met; a human closes it to done.",
     "",
     "Roster:",
     ...roster,
@@ -3221,8 +3216,8 @@ export function squadRetriggerBody(
     ? `squad「${squad.name}」的工单 ${ticketId}「${doc.title}」有新动态，${sender} 说：`
     : `An update on squad "${squad.name}" ticket ${ticketId} "${doc.title}" from ${sender}:`;
   const tail = zh
-    ? "读这条动态：需要下一步就 @-mention 成员派下去，不需要就保持沉默；只有整体目标达成才把父工单移到 review。"
-    : "Read the update: @-mention a member to delegate the next step, or stay silent; move the parent to review only once the overall goal is met.";
+    ? "读这条动态：需要下一步就按花名册的链接 @-mention 成员派下去（纯文本 @ 不触发），不需要就保持沉默；只有整体目标达成才把父工单移到 review。"
+    : "Read the update: @-mention a member to delegate the next step using the roster's bracketed link (a bare @handle triggers nothing), or stay silent; move the parent to review only once the overall goal is met.";
   return [head, "", text.trim(), "", tail].join("\n");
 }
 
@@ -3325,6 +3320,8 @@ Your organization directory is \`<app_data_dir>/organizations/${input.orgId}/\`.
 /** The body of the CEO's initialization work run, in the organization's working language. */
 function initBody(org: LoadedOrg): string {
   const board = userPrincipal(org.config.createdBy);
+  // The exact mention to paste for the board: markdown, since bare @text never triggers.
+  const boardMd = `[@${org.config.createdBy}](mention://user/${org.config.createdBy})`;
   const ceo = ceoAgentId(org.orgId);
   if (orgLanguage(org.config) === "zh") {
     return [
@@ -3333,13 +3330,13 @@ function initBody(org: LoadedOrg): string {
       "如果上面的使命说的是「镜像一家现实公司」——为现实同事各建一个数字分身、公司只负责传话——就改按 `company-mirror` Skill 行事，跳过下面这份清单。如果使命是做科研——跑实验、给出结论、写论文——下面的清单照常适用，另按 `company-research` Skill 补两件事：至少招一名不审自己稿的专职审稿人；任何实验循环开始前，负责人都要先在全员频道向董事会申请到资源额度。",
       "",
       "你是一家全新组织的 CEO，这是它的初始化运行。重要的事由董事会拍板，你负责提案。凡是动到这台机器、要花钱或触及组织之外的事——重负载计算、付费服务、公共工作区之外的写入、不可逆操作、缺少的凭据——每名员工（包括你）都先在全员频道请示董事会再动手（`company-employee` 的「What you may not decide alone」一节）。按顺序完成下面几件事：",
-      `1. 读手册。然后在全员频道里给董事会（${board}）写一份提案——\`penguin org channel send -m "@${board} …"\`——写清你对使命的理解、打算开的工作线与首批工单、打算招募的角色（先人事与财务）及其预算——所有人都用组织的 Model，组织未指定时用 Project 的默认 Model，除非使命为某个角色另行指定，提案里不要提 Model——以及公共工作区怎么划分。以明确的问题结尾，然后结束本轮：董事会答复之前不招人、不排日程、不开工单。`,
+      `1. 读手册。然后在全员频道里给董事会（${board}）写一份提案——\`penguin org channel send -m "${boardMd} …"\`（提及必须用这种方括号精确格式，纯文本 @ 不触发）——写清你对使命的理解、打算开的工作线与首批工单、打算招募的角色（先人事与财务）及其预算——所有人都用组织的 Model，组织未指定时用 Project 的默认 Model，除非使命为某个角色另行指定，提案里不要提 Model——以及公共工作区怎么划分。以明确的问题结尾，然后结束本轮：董事会答复之前不招人、不排日程、不开工单。`,
       `2. 答复会以提及或本会话消息的形式到来。董事会确认后，先招人事与财务——\`penguin org hire --new-agent ${org.orgId}_hr --title HR --reports-to ${ceo} --duties "…"\`，\`${org.orgId}_finance\` 同理——再招确认过的其他角色。`,
       "3. 按确认的方案划分公共工作区。你自己在 `ceo/` 里工作，招募时不给 `--workspace` 的员工落在以其 Agent id 命名的子目录里，公共工作区的根目录只放大家共读的共享输入、不是任何人的工位。要换个分区名字再单独分配（`penguin org employee set <agent_id> --workspace <子目录>`）；相对子目录会在分配时自动建好。",
       "4. 把你自己、人事与财务排进日历（`penguin org calendar add …`），做成轮值表而不是广播：你每天 09:00，人事每三天 10:00，财务每周 16:00（组织时区，写成带偏移量的 ISO 时刻，绝不用 `--start-at now`），此后每招一人就给它一个各自不同的时点。",
       "5. 把确认过的工单开进 `proposed`（`penguin org ticket create …`）：一个项目级目标一张父工单，每条工作线一张子工单。接受一张工单进入 `in_progress` 时就指派负责人（`penguin org ticket assign <id> --owner agent:<员工>`）：那名员工的工位会在下一次巡检时接手并发起工单会话。只有工单的负责人可以为它发起会话，所以你只为自己名下的工单执行 `penguin org ticket start <id>`；工位只负责调度与跟踪，绝不在工位上做工单本身的活。",
       "6. 每条工作线开一个频道（`penguin org channel create ch_<工作线> --name …`）并邀请它的负责人（`penguin org channel invite ch_<工作线> agent:<agent_id>`），免得一条线索淹没全员频道。",
-      `7. 在全员频道里向董事会汇报并 @${board}，如果还需要拍板，就点明下一个决定。`,
+      `7. 在全员频道里向董事会汇报并 ${boardMd}，如果还需要拍板，就点明下一个决定。`,
     ].join("\n");
   }
   return [
@@ -3348,13 +3345,13 @@ function initBody(org: LoadedOrg): string {
     "If the mission above says the organization MIRRORS a real company — one digital twin per real colleague, a company that only relays between people — follow the `company-mirror` skill instead and skip the checklist below. If it is a research mission — experiments to run, results to claim, papers to write — the checklist applies and the `company-research` skill adds two things: at least one dedicated reviewer who authors nothing it reviews, and no experiment loop before its owner has an approved resource envelope from the board.",
     "",
     'You are the CEO of a brand-new organization and this is its initialization run. The board decides the important things; you propose. Whatever touches this machine, spends money or reaches outside the organization — heavy compute, paid services, writing outside the shared workspace, anything irreversible, a missing credential — every employee, you included, asks the board in the all-hands channel before it starts (`company-employee`, "What you may not decide alone"). Work through the following, in order:',
-    `1. Read the handbook. Then write ONE proposal to the board (${board}) in the all-hands channel — \`penguin org channel send -m "@${board} …"\` — with your reading of the mission, the streams and first tickets you intend to file, the roles you intend to hire (HR and finance first) with budgets — every one on the organization's model, or the Project's default model when the organization names none, unless the mission asked for a particular one on a role, so propose no models — and how you will split the shared workspace. End with the explicit question and END THIS RUN: hire nothing, schedule nothing and file nothing before the board answers.`,
+    `1. Read the handbook. Then write ONE proposal to the board (${board}) in the all-hands channel — \`penguin org channel send -m "${boardMd} …"\` (mentions use this exact bracket form; a bare @handle triggers nothing) — with your reading of the mission, the streams and first tickets you intend to file, the roles you intend to hire (HR and finance first) with budgets — every one on the organization's model, or the Project's default model when the organization names none, unless the mission asked for a particular one on a role, so propose no models — and how you will split the shared workspace. End with the explicit question and END THIS RUN: hire nothing, schedule nothing and file nothing before the board answers.`,
     `2. The answer arrives as a mention or in this conversation. Once the board confirms, hire HR and finance first — \`penguin org hire --new-agent ${org.orgId}_hr --title HR --reports-to ${ceo} --duties "…"\` and the same for \`${org.orgId}_finance\` — then the confirmed roles.`,
     "3. Partition the shared workspace as confirmed. You already work in `ceo/`, and a hire given no `--workspace` lands in a sub-directory named after its Agent id; the root of the shared workspace holds the shared inputs everyone reads and is nobody's desk. Assign a different sub-directory where a partition should be named for the stream rather than the employee (`penguin org employee set <agent_id> --workspace <sub-directory>`); a relative sub-directory is created when you assign it.",
     "4. Put yourself, HR and finance on the calendar (`penguin org calendar add …`) as a rota, not a broadcast: you daily at 09:00, HR every three days at 10:00, finance weekly at 16:00 (organization timezone, ISO instants with the offset — never `--start-at now`), and give every later hire its own distinct hour.",
     "5. File the confirmed tickets in `proposed` (`penguin org ticket create …`): one parent ticket for the project-level goal and children per stream. Assign an owner as you accept one into `in_progress` (`penguin org ticket assign <id> --owner agent:<employee>`): that employee's desk picks it up in its next sweep and starts the ticket session itself. Only a ticket's owner may start its sessions, so run `penguin org ticket start <id>` for the tickets you own yourself — the desk schedules and tracks, and never does the ticket work itself.",
     "6. Open one channel per stream (`penguin org channel create ch_<stream> --name …`) and invite its owner (`penguin org channel invite ch_<stream> agent:<agent_id>`), so a stream's thread does not drown the all-hands channel.",
-    `7. Report to the board in the all-hands channel, mentioning @${board}, and name the next decision you need, if any.`,
+    `7. Report to the board in the all-hands channel, mentioning it as ${boardMd}, and name the next decision you need, if any.`,
   ].join("\n");
 }
 

@@ -57,7 +57,7 @@ penguin org channel ls --json                                   # which channels
 penguin org channel invite content agent:<org_id>_writer        # one invitation per stream the role touches
 ```
 
-6. Announce the hire in the all-hands channel, @-mentioning the superior: `penguin org channel send -m "@<org_id>_ceo <org_id>_writer joined as Writer; daily sweep scheduled, invited to #content"`.
+6. Announce the hire in the all-hands channel, @-mentioning the superior: `penguin org channel send -m "[@<org_id>_ceo](mention://agent/<org_id>_ceo) <org_id>_writer joined as Writer; daily sweep scheduled, invited to #content"`.
 
 ## Offboarding
 
@@ -66,7 +66,7 @@ penguin org channel invite content agent:<org_id>_writer        # one invitation
 - reassign or close the employee's tickets (`penguin org ticket ls --owner agent:<id>`) and unblock anything waiting on `agent:<id>`;
 - move its subordinates to a new superior (`penguin org employee set <sub> --reports-to <new>`) — an entry whose `reports_to` names a former employee is invalid and stops firing;
 - remove its events (`penguin org calendar rm <name> --agent-id <id>`): an event of a former employee never fires and only clutters the calendar;
-- take it out of the channels it was invited into (`penguin org channel remove <channel_id> agent:<id>`, one per channel — `penguin org channel ls --json` lists them with their members): a former employee left in a channel still receives every `@all` there, and every mention still costs money. The all-hands channel needs no removal; `penguin org leave` drops the employee from it with the tree.
+- take it out of the channels it was invited into (`penguin org channel remove <channel_id> agent:<id>`, one per channel — `penguin org channel ls --json` lists them with their members): a former employee left in a channel still receives every mention-all there, and every mention still costs money. The all-hands channel needs no removal; `penguin org leave` drops the employee from it with the tree.
 
 Announce it in the all-hands channel, @-mentioning the former superior. Deleting the Agent itself is a human's Project-level act, never HR's.
 

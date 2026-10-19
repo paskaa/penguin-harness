@@ -1580,7 +1580,7 @@ const en: Messages = {
     channelUnarchiveDesc: "Unarchive a channel (people only)",
     channelTailDesc: "Print a channel's last messages of a day (20 unless -n is given)",
     channelSendDesc:
-      "Send a message to a channel (@agent:<id> / @all mention its members and trigger their desks)",
+      "Send a message to a channel (mention as [@Name](mention://agent|user|squad|all/<id>) to trigger desks; bare @text never triggers)",
     handbookDesc:
       "The organization handbook: the knowledge base under handbook/, whose README.md is the index every run reads first",
     handbookListDesc: "List the handbook files (path, size, updated), the index first",
@@ -1647,7 +1647,7 @@ const en: Messages = {
     channelPurpose: "What the channel is for",
     channelDate: "Day to read (yyyy-mm-dd in the organization's timezone; defaults to today)",
     channelCount: "Number of messages to print (default 20)",
-    channelText: "Message text (@agent:<id> or @all to mention, inside the channel's membership)",
+    channelText: "Message text (mention as [@Name](mention://kind/id), inside the channel's membership)",
     handbookPath:
       "Path relative to handbook/ (plain segments, e.g. decisions/2026-09-02-hire-plan.md)",
     handbookText: "Document text",
@@ -2701,7 +2701,7 @@ const zh: Messages = {
     channelArchiveDesc: "归档频道：在取消归档前只读（仅限人）",
     channelUnarchiveDesc: "取消频道的归档（仅限人）",
     channelTailDesc: "打印某个频道某一天的最后若干条消息（未给 -n 时 20 条）",
-    channelSendDesc: "向频道发送消息（@agent:<id> / @all 提及频道成员并触发其工位）",
+    channelSendDesc: "向频道发送消息（用 [@名](mention://agent|user|squad|all/<id>) 提及并触发工位；纯文本 @ 不触发）",
     handbookDesc: "组织手册：handbook/ 下的知识库，其 README.md 是每轮先读的索引",
     handbookListDesc: "列出手册文件（路径、大小、更新时间），索引在前",
     handbookShowDesc: "打印一份手册文档（不给路径时打印索引）",
@@ -2757,7 +2757,7 @@ const zh: Messages = {
     channelPurpose: "频道用途",
     channelDate: "要读的日期（组织时区的 yyyy-mm-dd；缺省今天）",
     channelCount: "打印的消息条数（缺省 20）",
-    channelText: "消息内容（@agent:<id> 或 @all 表示提及，只能提及频道内的成员）",
+    channelText: "消息内容（用 [@名](mention://kind/id) 提及，只能提及频道内的成员）",
     handbookPath: "相对 handbook/ 的路径（普通片段，如 decisions/2026-09-02-hire-plan.md）",
     handbookText: "文档内容",
     handbookFile: "从本地文件读取文档内容",

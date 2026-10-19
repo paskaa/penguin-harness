@@ -23,7 +23,7 @@ Both are ordinary employees: the desk schedules, ticket sessions do the work, th
 
 ## The resource envelope comes first
 
-An experiment loop is the textbook case of what `company-employee` calls heavy or long compute, so it never starts on your own decision. Before the first experiment of a ticket, ask the board — the organization's creator, `@user:<id>` from `created_by` in `org_config.toml` — in the **all-hands channel** for the envelope, in one message:
+An experiment loop is the textbook case of what `company-employee` calls heavy or long compute, so it never starts on your own decision. Before the first experiment of a ticket, ask the board — the organization's creator, `[@creator](mention://user/<id>)` from `created_by` in `org_config.toml` — in the **all-hands channel** for the envelope, in one message:
 
 - **machine**: which host, GPU or CPU it runs on, and how much memory;
 - **concurrency**: how many experiments at once;
@@ -35,7 +35,7 @@ An experiment loop is the textbook case of what `company-employee` calls heavy o
 Then block the ticket on the board and end the run, exactly as "Asking the board" in `company-employee` says:
 
 ```bash
-penguin org channel send -m "@user:alice 2026-09-01-dep-eval is ready for its experiment loop: 5-minute runs on GPU 0 (about 10 GB of VRAM), one at a time, 40 runs or 4 h in total, 6 GB of disk under <app_data_dir>/organizations/co_lab/workspace/experiments/dep-eval/; the dataset is already in the shared root and no paid API is involved. It runs inside the ticket session — stop that session and the loop stops. May I start? Otherwise I stop at 10 runs." --ref-ticket 2026-09-01-dep-eval
+penguin org channel send -m "[@alice](mention://user/alice) 2026-09-01-dep-eval is ready for its experiment loop: 5-minute runs on GPU 0 (about 10 GB of VRAM), one at a time, 40 runs or 4 h in total, 6 GB of disk under <app_data_dir>/organizations/co_lab/workspace/experiments/dep-eval/; the dataset is already in the shared root and no paid API is involved. It runs inside the ticket session — stop that session and the loop stops. May I start? Otherwise I stop at 10 runs." --ref-ticket 2026-09-01-dep-eval
 penguin org ticket block 2026-09-01-dep-eval --reason "Waiting for the board's resource envelope for the experiment loop" --by user:alice
 ```
 
