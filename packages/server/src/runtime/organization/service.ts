@@ -1918,6 +1918,48 @@ export class OrganizationService {
     await this.dispatchSquadLeader(org, ticketId, t.doc, squad);
   }
 
+  /**
+   * Wakes the leader with one update (a progress note, a filed message): re-reads squad
+   * and ticket fresh, skips when the leader already has a live run (dedup: at most one
+   * outstanding re-trigger), stays silent when the ticket left the squad meanwhile — and
+   * never loops the leader's own words back at them.
+   */
+  private async wakeSquadLeaderForUpdate(
+    projectId: string,
+    orgId: string,
+    ticketId: string,
+    squadId: string,
+    sender: string,
+    text: string,
+  ): Promise<void> {
+    const org = await this.requireValidOrg(projectId, orgId);
+    const squad = (await this.readSquadsOrThrow(org))[squadId];
+    if (squad === undefined || squad.archived) return;
+    if (sender === squad.leader) return;
+    const t = await this.requireTicket(org, ticketId);
+    if (t.doc.owner !== squadPrincipal(squadId)) return;
+    const leaderId = principalAgentId(squad.leader);
+    if (leaderId === null || !org.byId.has(leaderId)) return;
+    if (squadLeaderBusy(this.deps, org, leaderId)) return;
+    try {
+      await dispatchToDesk(
+        this.deps,
+        org,
+        leaderId,
+        { kind: "ticket_work", ticket: ticketId },
+        squadRetriggerBody(squad, org, ticketId, t.doc, sender, text),
+        { hop: 0 },
+      );
+    } catch (err) {
+      this.deps.errors.record({
+        source: "organization",
+        err,
+        code: "org_squad_dispatch_failed",
+        ctx: { projectId: org.projectId, agentId: leaderId },
+      });
+    }
+  }
+
   async updateTicket(
     projectId: string,
     orgId: string,
@@ -2125,17 +2167,23 @@ export class OrganizationService {
     text: string,
     actor: Actor,
   ): Promise<OrgTicketDetail> {
-    await this.scheduler.withLock(projectId, orgId, async () => {
+    // A progress note on a squad-owned working ticket wakes the leader — the lock hands
+    // the capture out (never start a run under the org lock), the dispatch runs after it.
+    const retrigger = await this.scheduler.withLock(projectId, orgId, async () => {
       const org = await this.requireValidOrg(projectId, orgId);
       const t = await this.requireTicket(org, ticketId);
       const sentence = text.replace(/\s*\n\s*/g, " ").trim();
       if (sentence === "") throw badRequest("text must not be empty.");
       // The section is prose: the sentence alone, with who wrote it and when in the history.
       t.doc.progress = [...t.doc.progress, sentence];
-      this.recordHistory(t.doc, this.actorPrincipal(org, actor), "progress", historyNote(sentence));
+      const by = this.actorPrincipal(org, actor);
+      this.recordHistory(t.doc, by, "progress", historyNote(sentence));
       const booked = this.bookSession(org, actor, t.doc);
       await this.deps.store.writeTicket(org.dir, ticketId, t.column, t.doc);
       this.cacheBookedSession(org, ticketId, booked);
+      const squadId = principalSquadId(t.doc.owner);
+      const captured =
+        squadId !== null && t.column !== "proposed" ? { squadId, sender: by, sentence } : null;
       this.deps.notifyProject(projectId, {
         type: "org_ticket",
         projectId,
@@ -2143,7 +2191,18 @@ export class OrganizationService {
         ticketId,
         change: "progress",
       });
+      return captured;
     });
+    if (retrigger !== null) {
+      await this.wakeSquadLeaderForUpdate(
+        projectId,
+        orgId,
+        ticketId,
+        retrigger.squadId,
+        retrigger.sender,
+        retrigger.sentence,
+      );
+    }
     return this.ticket(projectId, orgId, ticketId);
   }
 
@@ -2683,11 +2742,17 @@ export class OrganizationService {
   /**
    * Whom a message addresses (organization/names.ts): an employee by id or by name, a Project
    * member by user id, `all` — an id before a name, an employee before a member of the same
-   * id — and the explicit `@agent:<id>` / `@user:<id>` for a writer who has to say which.
+   * id — and the explicit `@agent:<id>` / `@user:<id>` / `@squad:<id>` for a writer who has
+   * to say which (a squad mention resolves only while the squad is live).
    */
-  private async resolveMentions(org: LoadedOrg, text: string): Promise<string[]> {
+  private async resolveMentions(
+    org: LoadedOrg,
+    text: string,
+  ): Promise<{ mentions: string[]; squads: Squads }> {
     const users = new Set(this.projectUserIds(org));
     const names = await orgEmployeeNames(this.deps, org);
+    const squadsFile = await this.deps.store.readSquads(org.dir);
+    const squads = squadsFile.parsed.ok ? squadsFile.parsed.value : {};
     // Listed in order of precedence: of two handles of one length, the first one wins.
     const handles: MentionHandle[] = [
       { handle: "all", principal: "all" },
@@ -2702,17 +2767,22 @@ export class OrganizationService {
       ...[...users].map((id) => ({ handle: id, principal: userPrincipal(id) })),
     ];
     const out: string[] = [];
-    const found = findMentions(text, handles, (kind, id) =>
-      kind === "agent"
+    const found = findMentions(text, handles, (kind, id) => {
+      if (kind === "squad") {
+        const squad = squads[id];
+        // Only a live squad is mentionable; archived or unknown reads as text.
+        return squad !== undefined && !squad.archived ? squadPrincipal(id) : null;
+      }
+      return kind === "agent"
         ? org.byId.has(id)
           ? agentPrincipal(id)
           : null
         : users.has(id)
           ? userPrincipal(id)
-          : null,
-    );
+          : null;
+    });
     for (const { principal } of found) if (!out.includes(principal)) out.push(principal);
-    return out;
+    return { mentions: out, squads };
   }
 
   async sendChannelMessage(
@@ -2722,7 +2792,9 @@ export class OrganizationService {
     channelId: string,
     req: OrgChannelMessageSendRequest,
   ): Promise<OrgChannelMessage> {
-    const msg = await this.scheduler.withLock(projectId, orgId, async () => {
+    // A squad re-trigger captured in the lock, dispatched after the reconcile (same rule
+    // as ticket assignment: never start a run under the org lock).
+    const boxed = await this.scheduler.withLock(projectId, orgId, async () => {
       const org = await this.requireOrg(projectId, orgId);
       const text = req.text.trim();
       if (text === "") throw badRequest("text must not be empty.");
@@ -2745,9 +2817,17 @@ export class OrganizationService {
       }
       const members = this.channelMemberPrincipals(org, cfg);
       if (!members.includes(sender)) throw notAMember(channelId, sender);
-      const mentions = await this.resolveMentions(org, text);
-      // `@all` is the channel's own membership, so only named principals can be outsiders.
-      const outsiders = mentions.filter((m) => m !== "all" && !members.includes(m));
+      const { mentions, squads } = await this.resolveMentions(org, text);
+      // `@all` is the channel's own membership, so only named principals can be outsiders —
+      // and a squad is covered by its leader: mentioning a squad whose leader sits in this
+      // channel is mentioning someone in it.
+      const outsiders = mentions.filter((m) => {
+        if (m === "all" || members.includes(m)) return false;
+        const squadId = principalSquadId(m);
+        if (squadId === null) return true;
+        const leader = squads[squadId]?.leader;
+        return leader === undefined || !members.includes(leader);
+      });
       if (outsiders.length > 0) {
         throw new HttpError(
           400,
@@ -2756,16 +2836,43 @@ export class OrganizationService {
         );
       }
       const refs = req.refs;
-      return appendChannelMessage(this.deps, org, channelId, {
+      const posted = await appendChannelMessage(this.deps, org, channelId, {
         sender,
         hop,
         text,
         mentions,
         ...(refs !== undefined && Object.keys(refs).length > 0 ? { refs } : {}),
       });
+      // Squad re-trigger watch: a message filed under a squad-owned ticket, with no
+      // explicit @ and not from the leader, wakes the leader with the update (an @'d
+      // message is already routed by the mention sweep; the leader's own never loops).
+      const ticketRef = refs?.ticket;
+      let retrigger: { ticketId: string; squadId: string; text: string; sender: string } | null =
+        null;
+      if (ticketRef !== undefined && mentions.length === 0) {
+        const ticket = await this.deps.store.findTicket(org.dir, ticketRef);
+        if (ticket !== null && ticket.parsed.ok) {
+          const squadId = principalSquadId(ticket.parsed.value.owner);
+          const squad = squadId === null ? undefined : squads[squadId];
+          if (
+            squadId !== null &&
+            squad !== undefined &&
+            !squad.archived &&
+            sender !== squad.leader &&
+            ticket.parsed.value.status !== "proposed"
+          ) {
+            retrigger = { ticketId: ticketRef, squadId, text, sender };
+          }
+        }
+      }
+      return { posted, retrigger };
     });
     await this.scheduler.reconcile(projectId, orgId);
-    return msg;
+    if (boxed.retrigger !== null) {
+      const r = boxed.retrigger;
+      await this.wakeSquadLeaderForUpdate(projectId, orgId, r.ticketId, r.squadId, r.sender, r.text);
+    }
+    return boxed.posted;
   }
 
   async markRead(
@@ -2898,6 +3005,21 @@ function squadToDto(doc: SquadDoc): OrgSquad {
 }
 
 /**
+ * Whether the leader already has a live run on its desk: the re-trigger dedup (at most
+ * one outstanding wake — a second update while the first is still running waits for it).
+ * No desk yet counts as free; a status that cannot be read counts as busy.
+ */
+function squadLeaderBusy(deps: OrgDeps, org: LoadedOrg, leaderId: string): boolean {
+  const desk = org.desks[leaderId];
+  if (desk === undefined) return false;
+  try {
+    return deps.runner.statusOf(desk.sessionId) !== "idle";
+  } catch {
+    return true;
+  }
+}
+
+/**
  * The leader's dispatch: the operating protocol (system-managed, not editable), the roster
  * with the exact @-mention to paste per member, the squad's own instructions, and the
  * ticket. Written in the organization's language, like every trigger body.
@@ -2954,6 +3076,30 @@ export function squadDispatchBody(
     "Ticket:",
     ticket,
   ].join("\n");
+}
+
+/**
+ * The leader's re-trigger: one update (a progress note, a filed message) with a short
+ * protocol pointer — not the full dispatch (the leader already holds the roster): read
+ * the update, delegate the next step by @-mention or stay silent, and only move the
+ * parent to review once the overall goal is met.
+ */
+export function squadRetriggerBody(
+  squad: SquadDoc,
+  org: LoadedOrg,
+  ticketId: string,
+  doc: TicketDoc,
+  sender: string,
+  text: string,
+): string {
+  const zh = orgLanguage(org.config) === "zh";
+  const head = zh
+    ? `squad「${squad.name}」的工单 ${ticketId}「${doc.title}」有新动态，${sender} 说：`
+    : `An update on squad "${squad.name}" ticket ${ticketId} "${doc.title}" from ${sender}:`;
+  const tail = zh
+    ? "读这条动态：需要下一步就 @-mention 成员派下去，不需要就保持沉默；只有整体目标达成才把父工单移到 review。"
+    : "Read the update: @-mention a member to delegate the next step, or stay silent; move the parent to review only once the overall goal is met.";
+  return [head, "", text.trim(), "", tail].join("\n");
 }
 
 // ---------------------------------------------------------------------------

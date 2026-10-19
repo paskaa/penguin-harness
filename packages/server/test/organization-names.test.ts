@@ -59,8 +59,10 @@ describe("mentions", () => {
     { handle: "ann", principal: "user:ann" },
     { handle: "all", principal: "all" },
   ];
-  const explicit = (kind: "agent" | "user", id: string) =>
-    kind === "agent" && id === "acme_dev_a" ? "agent:acme_dev_a" : null;
+  const explicit = (kind: "agent" | "user" | "squad", id: string) =>
+    (kind === "agent" && id === "acme_dev_a") || (kind === "squad" && id === "delivery")
+      ? `${kind}:${id}`
+      : null;
   const found = (text: string) =>
     findMentions(text, handles, explicit).map((m) => [text.slice(m.start, m.end), m.principal]);
 
@@ -107,6 +109,9 @@ describe("mentions", () => {
   it("keeps the explicit forms", () => {
     expect(found("@agent:acme_dev_a. and @agent:ghost")).toEqual([
       ["@agent:acme_dev_a", "agent:acme_dev_a"],
+    ]);
+    expect(found("route to @squad:delivery please, not @squad:ghost")).toEqual([
+      ["@squad:delivery", "squad:delivery"],
     ]);
   });
 });

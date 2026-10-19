@@ -15,7 +15,7 @@ import type { OrgCalendarOutcome, OrgChannelMessage, OrgTicketChange } from "../
 import type { SessionRow } from "../../db/repos/sessions.js";
 import type { ChannelConfig, TicketDoc } from "../../organization/files.js";
 import { parseChannelMessageLine, serializeChannelMessageLine } from "../../organization/files.js";
-import { agentPrincipal, parsePrincipal, principalAgentId } from "../../organization/principal.js";
+import { agentPrincipal, parsePrincipal, principalAgentId, principalSquadId } from "../../organization/principal.js";
 import { DEFAULT_CHANNEL_ID } from "../../organization/paths.js";
 import type { TicketFile } from "../../organization/store.js";
 import { zonedDate } from "../../organization/zoned.js";
@@ -672,6 +672,7 @@ export async function scanChannels(
         if (msg.hop >= org.config.mentionChainLimit) continue;
         const senderAgent = principalAgentId(msg.sender);
         const targets = new Set<string>();
+        const squadsMentioned = new Set<string>();
         for (const m of msg.mentions) {
           const p = parsePrincipal(m);
           // A mention only reaches a member: the send path refuses the rest, and a
@@ -680,6 +681,9 @@ export async function scanChannels(
             if (members.has(p.id)) targets.add(p.id);
           } else if (p?.kind === "all") {
             for (const id of members) targets.add(id);
+          } else {
+            const squadId = principalSquadId(m);
+            if (squadId !== null) squadsMentioned.add(squadId);
           }
         }
         if (senderAgent !== null) targets.delete(senderAgent);
@@ -697,6 +701,31 @@ export async function scanChannels(
             mentionBody(all, msg),
             { hop: msg.hop, budget: budgetLine(org, spend, agentId) },
           );
+        }
+        // @squad: the leader handles this comment only — the assignee of whatever it is
+        // about stays unchanged. Only live squads whose leader sits in this channel.
+        if (squadsMentioned.size > 0) {
+          const squadsFile = await deps.store.readSquads(org.dir);
+          const squads = squadsFile.parsed.ok ? squadsFile.parsed.value : {};
+          for (const squadId of squadsMentioned) {
+            const squad = squads[squadId];
+            if (squad === undefined || squad.archived) continue;
+            const leaderId = principalAgentId(squad.leader);
+            if (leaderId === null || !members.has(leaderId) || !org.byId.has(leaderId)) continue;
+            if (leaderId === senderAgent) continue;
+            await dispatchToDesk(
+              deps,
+              org,
+              leaderId,
+              {
+                kind: "mention",
+                message: `${msg.id} from ${msg.sender}`,
+                channel: channelId,
+              },
+              mentionBody(all, msg),
+              { hop: msg.hop, budget: budgetLine(org, spend, leaderId) },
+            );
+          }
         }
       }
       deps.cache.setChannelOffset(org.projectId, org.orgId, channelId, date, nextOffset);

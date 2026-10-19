@@ -65,7 +65,7 @@ export interface MentionHandle {
 }
 
 const WORD = /[A-Za-z0-9_]/;
-const EXPLICIT = /^(agent|user):([A-Za-z0-9][A-Za-z0-9_.-]*)/;
+const EXPLICIT = /^(agent|user|squad):([A-Za-z0-9][A-Za-z0-9_.-]*)/;
 
 /**
  * Whether `rest` (the text after `@`, known to start with `handle`) lets the handle end there.
@@ -100,13 +100,13 @@ export interface MentionMatch {
  * `@anna` nor in `@ann-marie`, see endsHandle); one ending in anything else needs no
  * boundary, since such scripts have none.
  *
- * `@agent:<id>` and `@user:<id>` stay the explicit forms, resolved by `explicit`. A `@` that
- * names nothing is text.
+ * `@agent:<id>`, `@user:<id>` and `@squad:<id>` stay the explicit forms, resolved by
+ * `explicit`. A `@` that names nothing is text.
  */
 export function findMentions(
   text: string,
   handles: readonly MentionHandle[],
-  explicit: (kind: "agent" | "user", id: string) => string | null,
+  explicit: (kind: "agent" | "user" | "squad", id: string) => string | null,
 ): MentionMatch[] {
   const byLength = [...handles].sort((a, b) => b.handle.length - a.handle.length);
   const out: MentionMatch[] = [];
@@ -117,7 +117,7 @@ export function findMentions(
     const tagged = EXPLICIT.exec(rest);
     if (tagged !== null) {
       const id = tagged[2]!.replace(/[.-]+$/, "");
-      const principal = explicit(tagged[1] as "agent" | "user", id);
+      const principal = explicit(tagged[1] as "agent" | "user" | "squad", id);
       if (principal !== null) {
         const end = at + 1 + tagged[1]!.length + 1 + id.length;
         out.push({ start: at, end, principal });

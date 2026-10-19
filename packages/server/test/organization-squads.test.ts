@@ -7,6 +7,7 @@
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import { parseOrgTriggerMessage } from "@prismshadow/penguin-core/markers";
+import { DEFAULT_CHANNEL_ID } from "../src/organization/paths.js";
 import { makeOrgHarness } from "./org-harness.js";
 import type { OrgHarness } from "./org-harness.js";
 
@@ -149,5 +150,88 @@ describe("squads", () => {
     await expect(h.service.updateSquad(P, ORG, "delivery", { name: "x" })).rejects.toThrow(/archived/);
     expect(dispatchesTo("never-ran")).toHaveLength(0);
     expect(startedTexts().join("\n")).not.toContain("squad \"Delivery\"");
+  });
+
+  it("a progress note on a squad-owned working ticket wakes the leader, once", async () => {
+    await h.service.createSquad(P, ORG, { id: "delivery", name: "Delivery", leader: DEV });
+    const actor = { userId: "alice" };
+    const t = await h.service.createTicket(P, ORG, { title: "Ship it" }, actor);
+    await h.service.moveTicket(P, ORG, t.ticketId, "in_progress", undefined, actor);
+    await h.service.updateTicket(P, ORG, t.ticketId, { owner: "squad:delivery" }, actor);
+    const devDesk = h.started.at(-1)!.sessionId;
+    const before = h.started.length;
+    await h.service.progressTicket(P, ORG, t.ticketId, "backend done", actor);
+    expect(h.started).toHaveLength(before + 1);
+    const wake = h.started.at(-1)!;
+    expect(wake.sessionId).toBe(devDesk);
+    expect(wake.text).toContain("backend done");
+    expect(wake.text).toContain("stay silent");
+    // A second note while the leader is still running waits instead of stacking.
+    h.busy.add(devDesk);
+    await h.service.progressTicket(P, ORG, t.ticketId, "frontend done", actor);
+    expect(h.started).toHaveLength(before + 1);
+    h.busy.delete(devDesk);
+    await h.service.progressTicket(P, ORG, t.ticketId, "frontend done", actor);
+    expect(h.started).toHaveLength(before + 2);
+    // The leader's own note never loops back.
+    await h.service.progressTicket(
+      P,
+      ORG,
+      t.ticketId,
+      "noted",
+      { userId: "alice", sessionId: devDesk },
+    );
+    expect(h.started).toHaveLength(before + 2);
+  });
+
+  it("a filed message without @ wakes the leader; an @'d one routes by mention instead", async () => {
+    await h.service.createSquad(P, ORG, { id: "delivery", name: "Delivery", leader: DEV });
+    const actor = { userId: "alice" };
+    const t = await h.service.createTicket(P, ORG, { title: "Ship it" }, actor);
+    await h.service.moveTicket(P, ORG, t.ticketId, "in_progress", undefined, actor);
+    await h.service.updateTicket(P, ORG, t.ticketId, { owner: "squad:delivery" }, actor);
+    const devDesk = h.started.at(-1)!.sessionId;
+    const before = h.started.length;
+    await h.service.sendChannelMessage(P, ORG, "alice", DEFAULT_CHANNEL_ID, {
+      text: "staging is green",
+      refs: { ticket: t.ticketId },
+    });
+    expect(h.started).toHaveLength(before + 1);
+    expect(h.started.at(-1)!.sessionId).toBe(devDesk);
+    expect(h.started.at(-1)!.text).toContain("staging is green");
+    // An explicit @ is the routing signal: the mention sweep delivers it, no re-trigger.
+    const addressed = h.started.length;
+    await h.service.sendChannelMessage(P, ORG, "alice", DEFAULT_CHANNEL_ID, {
+      text: `@${QA} take the next step`,
+      refs: { ticket: t.ticketId },
+    });
+    const fresh = h.started.slice(addressed);
+    expect(fresh.every((s) => s.sessionId !== devDesk)).toBe(true);
+  });
+
+  it("@squad wakes the leader for that comment only, when the leader sits in the channel", async () => {
+    await h.service.createSquad(P, ORG, { id: "delivery", name: "Delivery", leader: DEV });
+    const before = h.started.length;
+    await h.service.sendChannelMessage(P, ORG, "alice", DEFAULT_CHANNEL_ID, {
+      text: "@squad:delivery who takes the deploy?",
+    });
+    const fresh = h.started.slice(before);
+    expect(fresh).toHaveLength(1);
+    expect(parseOrgTriggerMessage(fresh[0]!.text)?.origin.kind).toBe("mention");
+    // Unknown squads read as text; a leader outside the channel cannot be @'d through it.
+    await h.service.sendChannelMessage(P, ORG, "alice", DEFAULT_CHANNEL_ID, {
+      text: "@squad:ghost hello?",
+    });
+    expect(h.started).toHaveLength(before + 1);
+    await h.service.createChannel(
+      P,
+      ORG,
+      { channelId: "small", name: "Small", purpose: "qa only" },
+      { userId: "alice" },
+    );
+    await h.service.addChannelMember(P, ORG, "small", `agent:${QA}`, { userId: "alice" });
+    await expect(
+      h.service.sendChannelMessage(P, ORG, "alice", "small", { text: "@squad:delivery hi" }),
+    ).rejects.toMatchObject({ status: 400, code: "mention_not_member" });
   });
 });

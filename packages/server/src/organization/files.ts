@@ -1056,7 +1056,9 @@ export function parseChannelMessageLine(line: string): ParseResult<OrgChannelMes
   const mentions = o["mentions"] ?? [];
   if (
     !Array.isArray(mentions) ||
-    mentions.some((m) => typeof m !== "string" || parsePrincipal(m) === null)
+    mentions.some(
+      (m) => typeof m !== "string" || (parsePrincipal(m) === null && principalSquadId(m) === null),
+    )
   ) {
     return fail("mentions must be a list of principals");
   }
