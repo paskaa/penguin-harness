@@ -85,6 +85,12 @@ function dropInboxReads(db: DatabaseSync): void {
   db.exec("DROP TABLE IF EXISTS inbox_reads");
 }
 
+/** Migration 24's tables: a database stamped before it had neither. */
+function dropScheduleWebhooks(db: DatabaseSync): void {
+  db.exec("DROP TABLE IF EXISTS schedule_webhook_deliveries");
+  db.exec("DROP TABLE IF EXISTS schedule_webhook_triggers");
+}
+
 /** Every company-mode table the migrations add: a database from before them had none. */
 function dropCompanyModeTables(db: DatabaseSync): void {
   for (const table of [
@@ -117,6 +123,7 @@ function open024(): DatabaseSync {
   dropRunOutcomes(db);
   dropScheduleFirings(db);
   dropInboxReads(db);
+  dropScheduleWebhooks(db);
   db.exec("DROP TABLE IF EXISTS model_promotions");
   dropCompanyModeTables(db);
   db.exec("DROP TABLE messaging_bindings");
@@ -166,6 +173,7 @@ function open6(): DatabaseSync {
   dropRunOutcomes(db);
   dropScheduleFirings(db);
   dropInboxReads(db);
+  dropScheduleWebhooks(db);
   db.exec("DROP TABLE IF EXISTS model_promotions");
   db.exec(PRE_CHANNEL_CHAT_DDL);
   // SCHEMA_SQL declares the CURRENT shape; migration 8's queue came after 6.
@@ -187,6 +195,7 @@ function open7(): DatabaseSync {
   dropRunOutcomes(db);
   dropScheduleFirings(db);
   dropInboxReads(db);
+  dropScheduleWebhooks(db);
   db.exec("DROP TABLE IF EXISTS model_promotions");
   db.exec("PRAGMA user_version = 7");
   return db;
@@ -204,6 +213,7 @@ function open8(): DatabaseSync {
   dropRunOutcomes(db);
   dropScheduleFirings(db);
   dropInboxReads(db);
+  dropScheduleWebhooks(db);
   db.exec("DROP TABLE IF EXISTS model_promotions");
   db.exec("PRAGMA user_version = 8");
   return db;
@@ -221,6 +231,7 @@ function open9(): DatabaseSync {
   dropRunOutcomes(db);
   dropScheduleFirings(db);
   dropInboxReads(db);
+  dropScheduleWebhooks(db);
   db.exec("PRAGMA user_version = 9");
   return db;
 }
@@ -237,6 +248,7 @@ function open029(): DatabaseSync {
   dropRunOutcomes(db);
   dropScheduleFirings(db);
   dropInboxReads(db);
+  dropScheduleWebhooks(db);
   db.exec("DROP TABLE IF EXISTS model_promotions");
   dropCompanyModeTables(db);
   db.exec(GOAL_STATE_DDL);
@@ -265,6 +277,7 @@ function openPreProfile(): DatabaseSync {
   dropRunOutcomes(db);
   dropScheduleFirings(db);
   dropInboxReads(db);
+  dropScheduleWebhooks(db);
   db.exec("DROP TABLE IF EXISTS model_promotions");
   dropProfileColumns(db);
   // Version 4 predates company mode as well: its three migrations (6–8) come after the
@@ -674,6 +687,7 @@ describe("migration 8 → current: model-promotions", () => {
         "run-outcomes",
         "schedule-firings",
         "inbox-reads",
+        "schedule-webhooks",
       ]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       expect(promotionsTableExists()).toEqual({ "1": 1 });
@@ -707,6 +721,7 @@ describe("migration 8 → current: model-promotions", () => {
         "run-outcomes",
         "schedule-firings",
         "inbox-reads",
+        "schedule-webhooks",
       ]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
     } finally {
@@ -740,6 +755,7 @@ describe("migration 9 → current: model-provider-auth-tokens", () => {
         "run-outcomes",
         "schedule-firings",
         "inbox-reads",
+        "schedule-webhooks",
       ]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       expect(tableExists()).toEqual({ "1": 1 });
@@ -779,6 +795,7 @@ function open12(): DatabaseSync {
   dropRunOutcomes(db);
   dropScheduleFirings(db);
   dropInboxReads(db);
+  dropScheduleWebhooks(db);
   db.exec("PRAGMA user_version = 12");
   return db;
 }
@@ -799,6 +816,7 @@ describe("migration 12 → current: browser-extensions", () => {
         "run-outcomes",
         "schedule-firings",
         "inbox-reads",
+        "schedule-webhooks",
       ]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       db.exec("PRAGMA foreign_keys = ON");
@@ -852,6 +870,7 @@ function open13(): DatabaseSync {
   dropRunOutcomes(db);
   dropScheduleFirings(db);
   dropInboxReads(db);
+  dropScheduleWebhooks(db);
   db.exec("PRAGMA user_version = 13");
   return db;
 }
@@ -871,6 +890,7 @@ describe("migration 13 → current: agent-api", () => {
         "run-outcomes",
         "schedule-firings",
         "inbox-reads",
+        "schedule-webhooks",
       ]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       const enable = () =>
@@ -949,6 +969,7 @@ function open14(): DatabaseSync {
   dropRunOutcomes(db);
   dropScheduleFirings(db);
   dropInboxReads(db);
+  dropScheduleWebhooks(db);
   db.exec("PRAGMA user_version = 14");
   return db;
 }
@@ -968,6 +989,7 @@ describe("migration 14 → current: messaging-conversations", () => {
         "run-outcomes",
         "schedule-firings",
         "inbox-reads",
+        "schedule-webhooks",
       ]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       const put = () =>
@@ -996,6 +1018,7 @@ function open15(): DatabaseSync {
   dropRunOutcomes(db);
   dropScheduleFirings(db);
   dropInboxReads(db);
+  dropScheduleWebhooks(db);
   db.exec("ALTER TABLE sessions DROP COLUMN kept_at");
   db.exec("PRAGMA user_version = 15");
   return db;
@@ -1021,6 +1044,7 @@ describe("migration 15 → current: sessions-kept-at", () => {
         "run-outcomes",
         "schedule-firings",
         "inbox-reads",
+        "schedule-webhooks",
       ]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       expect(db.prepare("SELECT session_id, kept_at FROM sessions").all()).toEqual([
@@ -1362,6 +1386,7 @@ function open18(): DatabaseSync {
   dropRunOutcomes(db);
   dropScheduleFirings(db);
   dropInboxReads(db);
+  dropScheduleWebhooks(db);
   db.exec("ALTER TABLE schedule_state DROP COLUMN fail_count");
   db.exec("ALTER TABLE schedule_state DROP COLUMN auto_paused_at");
   db.exec("ALTER TABLE schedule_state DROP COLUMN auto_pause_reason");
@@ -1379,12 +1404,12 @@ describe("migration 18 → current: model-health", () => {
     const db = open18();
     try {
       expect(healthTableExists(db)).toBeUndefined();
-      expect(migrate(db).applied).toEqual(["model-health", "schedule-auto-pause", "run-outcomes", "schedule-firings", "inbox-reads"]);
+      expect(migrate(db).applied).toEqual(["model-health", "schedule-auto-pause", "run-outcomes", "schedule-firings", "inbox-reads", "schedule-webhooks"]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       expect(healthTableExists(db)).toEqual({ ok: 1 });
       rollbackTo(db, 18);
       expect(healthTableExists(db)).toBeUndefined();
-      expect(migrate(db).applied).toEqual(["model-health", "schedule-auto-pause", "run-outcomes", "schedule-firings", "inbox-reads"]);
+      expect(migrate(db).applied).toEqual(["model-health", "schedule-auto-pause", "run-outcomes", "schedule-firings", "inbox-reads", "schedule-webhooks"]);
       expect(healthTableExists(db)).toEqual({ ok: 1 });
     } finally {
       db.close();
@@ -1394,7 +1419,7 @@ describe("migration 18 → current: model-health", () => {
   it("is safe to create while a pushed platform boots", () => {
     const db = open18();
     try {
-      expect(migrate(db, { swapPath: true }).applied).toEqual(["model-health", "schedule-auto-pause", "run-outcomes", "schedule-firings", "inbox-reads"]);
+      expect(migrate(db, { swapPath: true }).applied).toEqual(["model-health", "schedule-auto-pause", "run-outcomes", "schedule-firings", "inbox-reads", "schedule-webhooks"]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
     } finally {
       db.close();
@@ -1409,6 +1434,7 @@ function open19(): DatabaseSync {
   dropRunOutcomes(db);
   dropScheduleFirings(db);
   dropInboxReads(db);
+  dropScheduleWebhooks(db);
   db.exec("ALTER TABLE schedule_state DROP COLUMN fail_count");
   db.exec("ALTER TABLE schedule_state DROP COLUMN auto_paused_at");
   db.exec("ALTER TABLE schedule_state DROP COLUMN auto_pause_reason");
@@ -1428,7 +1454,7 @@ describe("migration 19 → current: schedule-auto-pause", () => {
     const db = open19();
     try {
       expect(columns(db)).not.toContain("fail_count");
-      expect(migrate(db).applied).toEqual(["schedule-auto-pause", "run-outcomes", "schedule-firings", "inbox-reads"]);
+      expect(migrate(db).applied).toEqual(["schedule-auto-pause", "run-outcomes", "schedule-firings", "inbox-reads", "schedule-webhooks"]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       expect(columns(db)).toEqual(expect.arrayContaining(["fail_count", "auto_paused_at", "auto_pause_reason"]));
       // A second pass is a no-op: the declarative track may already have applied it (ADOPTION).
@@ -1441,7 +1467,7 @@ describe("migration 19 → current: schedule-auto-pause", () => {
   it("is safe to add while a pushed platform boots", () => {
     const db = open19();
     try {
-      expect(migrate(db, { swapPath: true }).applied).toEqual(["schedule-auto-pause", "run-outcomes", "schedule-firings", "inbox-reads"]);
+      expect(migrate(db, { swapPath: true }).applied).toEqual(["schedule-auto-pause", "run-outcomes", "schedule-firings", "inbox-reads", "schedule-webhooks"]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
     } finally {
       db.close();
@@ -1456,6 +1482,7 @@ function open20(): DatabaseSync {
   dropRunOutcomes(db);
   dropScheduleFirings(db);
   dropInboxReads(db);
+  dropScheduleWebhooks(db);
   db.exec("PRAGMA user_version = 20");
   return db;
 }
@@ -1470,12 +1497,12 @@ describe("migration 20 → current: run-outcomes", () => {
     const db = open20();
     try {
       expect(outcomesTableExists(db)).toBeUndefined();
-      expect(migrate(db).applied).toEqual(["run-outcomes", "schedule-firings", "inbox-reads"]);
+      expect(migrate(db).applied).toEqual(["run-outcomes", "schedule-firings", "inbox-reads", "schedule-webhooks"]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       expect(outcomesTableExists(db)).toEqual({ ok: 1 });
       rollbackTo(db, 20);
       expect(outcomesTableExists(db)).toBeUndefined();
-      expect(migrate(db).applied).toEqual(["run-outcomes", "schedule-firings", "inbox-reads"]);
+      expect(migrate(db).applied).toEqual(["run-outcomes", "schedule-firings", "inbox-reads", "schedule-webhooks"]);
       expect(outcomesTableExists(db)).toEqual({ ok: 1 });
     } finally {
       db.close();
@@ -1485,7 +1512,7 @@ describe("migration 20 → current: run-outcomes", () => {
   it("is safe to create while a pushed platform boots", () => {
     const db = open20();
     try {
-      expect(migrate(db, { swapPath: true }).applied).toEqual(["run-outcomes", "schedule-firings", "inbox-reads"]);
+      expect(migrate(db, { swapPath: true }).applied).toEqual(["run-outcomes", "schedule-firings", "inbox-reads", "schedule-webhooks"]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
     } finally {
       db.close();
@@ -1499,6 +1526,7 @@ function open21(): DatabaseSync {
   db.exec(SCHEMA_SQL);
   dropScheduleFirings(db);
   dropInboxReads(db);
+  dropScheduleWebhooks(db);
   db.exec("PRAGMA user_version = 21");
   return db;
 }
@@ -1513,12 +1541,12 @@ describe("migration 21 → current: schedule-firings", () => {
     const db = open21();
     try {
       expect(firingsTableExists(db)).toBeUndefined();
-      expect(migrate(db).applied).toEqual(["schedule-firings", "inbox-reads"]);
+      expect(migrate(db).applied).toEqual(["schedule-firings", "inbox-reads", "schedule-webhooks"]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       expect(firingsTableExists(db)).toEqual({ ok: 1 });
       rollbackTo(db, 21);
       expect(firingsTableExists(db)).toBeUndefined();
-      expect(migrate(db).applied).toEqual(["schedule-firings", "inbox-reads"]);
+      expect(migrate(db).applied).toEqual(["schedule-firings", "inbox-reads", "schedule-webhooks"]);
       expect(firingsTableExists(db)).toEqual({ ok: 1 });
     } finally {
       db.close();
@@ -1528,7 +1556,7 @@ describe("migration 21 → current: schedule-firings", () => {
   it("is safe to create while a pushed platform boots", () => {
     const db = open21();
     try {
-      expect(migrate(db, { swapPath: true }).applied).toEqual(["schedule-firings", "inbox-reads"]);
+      expect(migrate(db, { swapPath: true }).applied).toEqual(["schedule-firings", "inbox-reads", "schedule-webhooks"]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
     } finally {
       db.close();
@@ -1541,6 +1569,7 @@ function open22(): DatabaseSync {
   const db = new sqlite.DatabaseSync(":memory:");
   db.exec(SCHEMA_SQL);
   dropInboxReads(db);
+  dropScheduleWebhooks(db);
   db.exec("PRAGMA user_version = 22");
   return db;
 }
@@ -1555,7 +1584,7 @@ describe("migration 22 → current: inbox-reads", () => {
     const db = open22();
     try {
       expect(tableExists(db)).toBeUndefined();
-      expect(migrate(db).applied).toEqual(["inbox-reads"]);
+      expect(migrate(db).applied).toEqual(["inbox-reads", "schedule-webhooks"]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       expect(tableExists(db)).toEqual({ ok: 1 });
       const insert = () =>
@@ -1571,7 +1600,7 @@ describe("migration 22 → current: inbox-reads", () => {
       rollbackTo(db, 22);
       expect(schemaVersion(db)).toBe(22);
       expect(tableExists(db)).toBeUndefined();
-      expect(migrate(db).applied).toEqual(["inbox-reads"]);
+      expect(migrate(db).applied).toEqual(["inbox-reads", "schedule-webhooks"]);
       expect(tableExists(db)).toEqual({ ok: 1 });
     } finally {
       db.close();
@@ -1581,7 +1610,69 @@ describe("migration 22 → current: inbox-reads", () => {
   it("is safe to create while a pushed platform boots", () => {
     const db = open22();
     try {
-      expect(migrate(db, { swapPath: true }).applied).toEqual(["inbox-reads"]);
+      expect(migrate(db, { swapPath: true }).applied).toEqual(["inbox-reads", "schedule-webhooks"]);
+      expect(schemaVersion(db)).toBe(LATEST_VERSION);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+/** A database stamped at migration 23: everything before the schedule webhooks. */
+function open23(): DatabaseSync {
+  const db = new sqlite.DatabaseSync(":memory:");
+  db.exec(SCHEMA_SQL);
+  dropScheduleWebhooks(db);
+  db.exec("PRAGMA user_version = 23");
+  return db;
+}
+
+describe("migration 23 → current: schedule-webhooks", () => {
+  const tableExists = (db: DatabaseSync, name: string) =>
+    db
+      .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get(name);
+
+  it("creates triggers and deliveries, and its down drops both again", () => {
+    const db = open23();
+    try {
+      expect(tableExists(db, "schedule_webhook_triggers")).toBeUndefined();
+      expect(tableExists(db, "schedule_webhook_deliveries")).toBeUndefined();
+      expect(migrate(db).applied).toEqual(["schedule-webhooks"]);
+      expect(schemaVersion(db)).toBe(LATEST_VERSION);
+      expect(tableExists(db, "schedule_webhook_triggers")).toEqual({ ok: 1 });
+      expect(tableExists(db, "schedule_webhook_deliveries")).toEqual({ ok: 1 });
+      // One trigger per schedule; one delivery per dedupe key — but keyless
+      // deliveries never collide, on either engine.
+      db.prepare(
+        "INSERT INTO schedule_webhook_triggers (id, project_id, agent_id, name, token, created_at, updated_at)" +
+          " VALUES ('wht_1', 'p1', 'a1', 'n', 'whk_1', '2026-10-19T00:00:00.000Z', '2026-10-19T00:00:00.000Z')",
+      ).run();
+      const insertDelivery = (id: string, key: string | null) =>
+        db
+          .prepare(
+            "INSERT INTO schedule_webhook_deliveries (id, trigger_id, dedupe_key, created_at)" +
+              " VALUES (?, 'wht_1', ?, '2026-10-19T00:00:00.000Z')",
+          )
+          .run(id, key);
+      insertDelivery("whd_1", "k1");
+      expect(() => insertDelivery("whd_2", "k1")).toThrow(/UNIQUE/);
+      insertDelivery("whd_3", null);
+      insertDelivery("whd_4", null);
+      rollbackTo(db, 23);
+      expect(schemaVersion(db)).toBe(23);
+      expect(tableExists(db, "schedule_webhook_triggers")).toBeUndefined();
+      expect(tableExists(db, "schedule_webhook_deliveries")).toBeUndefined();
+      expect(migrate(db).applied).toEqual(["schedule-webhooks"]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("is safe to create while a pushed platform boots", () => {
+    const db = open23();
+    try {
+      expect(migrate(db, { swapPath: true }).applied).toEqual(["schedule-webhooks"]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
     } finally {
       db.close();

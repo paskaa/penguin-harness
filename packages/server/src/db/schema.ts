@@ -85,6 +85,38 @@ CREATE TABLE IF NOT EXISTS inbox_reads ( -- Per-user inbox row state: read + arc
   PRIMARY KEY (user_id, project_id, org_id, row_key)
 );`;
 
+export const SCHEDULE_WEBHOOKS_SQL = `
+CREATE TABLE IF NOT EXISTS schedule_webhook_triggers ( -- One webhook trigger per schedule at most: the bearer token in the public ingress URL is the credential, the optional secret authenticates the sender (HMAC-SHA256). Never leaves the server except the token at creation (once) and the secret's last-4 hint.
+  id          TEXT PRIMARY KEY,
+  project_id  TEXT NOT NULL,
+  agent_id    TEXT NOT NULL,
+  name        TEXT NOT NULL,
+  token       TEXT NOT NULL,
+  provider    TEXT NOT NULL DEFAULT 'generic',
+  secret      TEXT,
+  enabled     INTEGER NOT NULL DEFAULT 1,
+  last_fired_at TEXT,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL,
+  UNIQUE (project_id, agent_id, name),
+  UNIQUE (token)
+);
+CREATE TABLE IF NOT EXISTS schedule_webhook_deliveries ( -- One row per accepted POST to a trigger: the idempotency record (trigger_id, dedupe_key) is unique while the key is set — both engines treat NULL keys as distinct, so keyless deliveries never collide — plus the signature verdict, the outcome, and the firing it caused (replays deliberately cause a second one).
+  id               TEXT PRIMARY KEY,
+  trigger_id       TEXT NOT NULL,
+  dedupe_key       TEXT,
+  event            TEXT NOT NULL DEFAULT '',
+  signature_status TEXT NOT NULL DEFAULT 'not_required',
+  status           TEXT NOT NULL DEFAULT 'queued',
+  firing_id        INTEGER,
+  payload          TEXT NOT NULL DEFAULT '',
+  headers          TEXT NOT NULL DEFAULT '{}',
+  attempt_count    INTEGER NOT NULL DEFAULT 1,
+  created_at       TEXT NOT NULL,
+  UNIQUE (trigger_id, dedupe_key)
+);
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_trigger ON schedule_webhook_deliveries(trigger_id, created_at);`;
+
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS users (
   user_id             TEXT PRIMARY KEY,            -- semantic id doubles as login name: ^[a-z][a-z0-9_-]{1,31}$
@@ -127,6 +159,7 @@ ${MODEL_HEALTH_SQL}
 ${RUN_OUTCOMES_SQL}
 ${SCHEDULE_FIRINGS_SQL}
 ${INBOX_READS_SQL}
+${SCHEDULE_WEBHOOKS_SQL}
 CREATE TABLE IF NOT EXISTS agents (           -- index only; name/description live in system_config.yaml
   project_id TEXT NOT NULL,
   agent_id   TEXT NOT NULL,

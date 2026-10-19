@@ -803,6 +803,53 @@ export const MIGRATIONS: readonly Migration[] = [
       db.exec("DROP TABLE IF EXISTS inbox_reads");
     },
   },
+  {
+    version: 24,
+    name: "schedule-webhooks",
+    // Additive: two new tables. Webhook triggers + deliveries for schedules; a predecessor
+    // build never reads them and keeps serving ticks and manual fires, so a rollback survives it.
+    swapSafe: true,
+    up(db) {
+      // Frozen copy of the DDL as of the webhook trigger landing; do not re-derive from schema.ts.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS schedule_webhook_triggers (
+          id          TEXT PRIMARY KEY,
+          project_id  TEXT NOT NULL,
+          agent_id    TEXT NOT NULL,
+          name        TEXT NOT NULL,
+          token       TEXT NOT NULL,
+          provider    TEXT NOT NULL DEFAULT 'generic',
+          secret      TEXT,
+          enabled     INTEGER NOT NULL DEFAULT 1,
+          last_fired_at TEXT,
+          created_at  TEXT NOT NULL,
+          updated_at  TEXT NOT NULL,
+          UNIQUE (project_id, agent_id, name),
+          UNIQUE (token)
+        );
+        CREATE TABLE IF NOT EXISTS schedule_webhook_deliveries (
+          id               TEXT PRIMARY KEY,
+          trigger_id       TEXT NOT NULL,
+          dedupe_key       TEXT,
+          event            TEXT NOT NULL DEFAULT '',
+          signature_status TEXT NOT NULL DEFAULT 'not_required',
+          status           TEXT NOT NULL DEFAULT 'queued',
+          firing_id        INTEGER,
+          payload          TEXT NOT NULL DEFAULT '',
+          headers          TEXT NOT NULL DEFAULT '{}',
+          attempt_count    INTEGER NOT NULL DEFAULT 1,
+          created_at       TEXT NOT NULL,
+          UNIQUE (trigger_id, dedupe_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_trigger ON schedule_webhook_deliveries(trigger_id, created_at);
+      `);
+    },
+    // LOSES webhook triggers (issued URLs stop resolving) and their delivery history.
+    down(db) {
+      db.exec("DROP TABLE IF EXISTS schedule_webhook_deliveries");
+      db.exec("DROP TABLE IF EXISTS schedule_webhook_triggers");
+    },
+  },
 ];
 
 /** The highest version this build knows how to reach. */
