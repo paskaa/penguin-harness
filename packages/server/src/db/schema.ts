@@ -32,6 +32,21 @@ CREATE TABLE IF NOT EXISTS model_provider_auth_tokens ( -- Server-side OAuth ref
   PRIMARY KEY (project_id, provider)
 );`;
 
+export const MODEL_HEALTH_SQL = `
+CREATE TABLE IF NOT EXISTS model_health ( -- Per-Project per-model health memory for failover: consecutive transport-failure counts (reset by any success) and manual quality-failure bans. Read by failover target selection (a Project-local echo of tracker's ph_model_pool failure memory); lost rows only mean the next failover round re-learns from zero.
+  project_id      TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+  provider        TEXT NOT NULL,
+  model_id        TEXT NOT NULL,
+  failures        INTEGER NOT NULL DEFAULT 0,  -- consecutive counted failures (rate_limited/timeout/network/connect_failed); a success resets it
+  last_error      TEXT,                        -- the counted error code of the last failure
+  last_failure_at TEXT,                        -- ISO instant of the last counted failure
+  qfail_count     INTEGER NOT NULL DEFAULT 0,  -- consecutive manual quality failures; QUALITY_FAIL_THRESHOLD within the cooldown bans the model
+  qfail_at        TEXT,                        -- ISO instant of the last quality failure
+  qfail_reason    TEXT,                        -- reason of the last quality failure
+  updated_at      TEXT NOT NULL,
+  PRIMARY KEY (project_id, provider, model_id)
+);`;
+
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS users (
   user_id             TEXT PRIMARY KEY,            -- semantic id doubles as login name: ^[a-z][a-z0-9_-]{1,31}$
@@ -70,6 +85,7 @@ CREATE TABLE IF NOT EXISTS project_members (  -- member grants only; owners are 
 );
 ${MODEL_PROMOTIONS_SQL}
 ${MODEL_PROVIDER_AUTH_TOKENS_SQL}
+${MODEL_HEALTH_SQL}
 CREATE TABLE IF NOT EXISTS agents (           -- index only; name/description live in system_config.yaml
   project_id TEXT NOT NULL,
   agent_id   TEXT NOT NULL,

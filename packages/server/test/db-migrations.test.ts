@@ -65,6 +65,11 @@ function dropMessagingConversations(db: DatabaseSync): void {
   db.exec("DROP TABLE IF EXISTS messaging_conversations");
 }
 
+/** Migration 19's table: a database stamped before it had none. */
+function dropModelHealth(db: DatabaseSync): void {
+  db.exec("DROP TABLE IF EXISTS model_health");
+}
+
 /** Every company-mode table the migrations add: a database from before them had none. */
 function dropCompanyModeTables(db: DatabaseSync): void {
   for (const table of [
@@ -93,6 +98,7 @@ function open024(): DatabaseSync {
   dropBrowserExtensions(db);
   dropAgentApi(db);
   dropMessagingConversations(db);
+  dropModelHealth(db);
   db.exec("DROP TABLE IF EXISTS model_promotions");
   dropCompanyModeTables(db);
   db.exec("DROP TABLE messaging_bindings");
@@ -138,6 +144,7 @@ function open6(): DatabaseSync {
   dropBrowserExtensions(db);
   dropAgentApi(db);
   dropMessagingConversations(db);
+  dropModelHealth(db);
   db.exec("DROP TABLE IF EXISTS model_promotions");
   db.exec(PRE_CHANNEL_CHAT_DDL);
   // SCHEMA_SQL declares the CURRENT shape; migration 8's queue came after 6.
@@ -155,6 +162,7 @@ function open7(): DatabaseSync {
   dropBrowserExtensions(db);
   dropAgentApi(db);
   dropMessagingConversations(db);
+  dropModelHealth(db);
   db.exec("DROP TABLE IF EXISTS model_promotions");
   db.exec("PRAGMA user_version = 7");
   return db;
@@ -168,6 +176,7 @@ function open8(): DatabaseSync {
   dropBrowserExtensions(db);
   dropAgentApi(db);
   dropMessagingConversations(db);
+  dropModelHealth(db);
   db.exec("DROP TABLE IF EXISTS model_promotions");
   db.exec("PRAGMA user_version = 8");
   return db;
@@ -181,6 +190,7 @@ function open9(): DatabaseSync {
   dropBrowserExtensions(db);
   dropAgentApi(db);
   dropMessagingConversations(db);
+  dropModelHealth(db);
   db.exec("PRAGMA user_version = 9");
   return db;
 }
@@ -193,6 +203,7 @@ function open029(): DatabaseSync {
   dropBrowserExtensions(db);
   dropAgentApi(db);
   dropMessagingConversations(db);
+  dropModelHealth(db);
   db.exec("DROP TABLE IF EXISTS model_promotions");
   dropCompanyModeTables(db);
   db.exec(GOAL_STATE_DDL);
@@ -217,6 +228,7 @@ function openPreProfile(): DatabaseSync {
   dropBrowserExtensions(db);
   dropAgentApi(db);
   dropMessagingConversations(db);
+  dropModelHealth(db);
   db.exec("DROP TABLE IF EXISTS model_promotions");
   dropProfileColumns(db);
   // Version 4 predates company mode as well: its three migrations (6–8) come after the
@@ -621,6 +633,7 @@ describe("migration 8 → current: model-promotions", () => {
         "sessions-kept-at",
         "agent-api-session-settings",
         "agent-api-concurrency",
+        "model-health",
       ]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       expect(promotionsTableExists()).toEqual({ "1": 1 });
@@ -649,6 +662,7 @@ describe("migration 8 → current: model-promotions", () => {
         "sessions-kept-at",
         "agent-api-session-settings",
         "agent-api-concurrency",
+        "model-health",
       ]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
     } finally {
@@ -677,6 +691,7 @@ describe("migration 9 → current: model-provider-auth-tokens", () => {
         "sessions-kept-at",
         "agent-api-session-settings",
         "agent-api-concurrency",
+        "model-health",
       ]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       expect(tableExists()).toEqual({ "1": 1 });
@@ -712,6 +727,7 @@ function open12(): DatabaseSync {
   dropBrowserExtensions(db);
   dropAgentApi(db);
   dropMessagingConversations(db);
+  dropModelHealth(db);
   db.exec("PRAGMA user_version = 12");
   return db;
 }
@@ -727,6 +743,7 @@ describe("migration 12 → current: browser-extensions", () => {
         "sessions-kept-at",
         "agent-api-session-settings",
         "agent-api-concurrency",
+        "model-health",
       ]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       db.exec("PRAGMA foreign_keys = ON");
@@ -776,6 +793,7 @@ function open13(): DatabaseSync {
   db.exec(SCHEMA_SQL);
   dropAgentApi(db);
   dropMessagingConversations(db);
+  dropModelHealth(db);
   db.exec("PRAGMA user_version = 13");
   return db;
 }
@@ -790,6 +808,7 @@ describe("migration 13 → current: agent-api", () => {
         "sessions-kept-at",
         "agent-api-session-settings",
         "agent-api-concurrency",
+        "model-health",
       ]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       const enable = () =>
@@ -864,6 +883,7 @@ function open14(): DatabaseSync {
   const db = new sqlite.DatabaseSync(":memory:");
   db.exec(SCHEMA_SQL);
   dropMessagingConversations(db);
+  dropModelHealth(db);
   db.exec("PRAGMA user_version = 14");
   return db;
 }
@@ -878,6 +898,7 @@ describe("migration 14 → current: messaging-conversations", () => {
         "sessions-kept-at",
         "agent-api-session-settings",
         "agent-api-concurrency",
+        "model-health",
       ]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       const put = () =>
@@ -902,6 +923,7 @@ describe("migration 14 → current: messaging-conversations", () => {
 function open15(): DatabaseSync {
   const db = new sqlite.DatabaseSync(":memory:");
   db.exec(SCHEMA_SQL);
+  dropModelHealth(db);
   db.exec("ALTER TABLE sessions DROP COLUMN kept_at");
   db.exec("PRAGMA user_version = 15");
   return db;
@@ -922,6 +944,7 @@ describe("migration 15 → current: sessions-kept-at", () => {
         "sessions-kept-at",
         "agent-api-session-settings",
         "agent-api-concurrency",
+        "model-health",
       ]);
       expect(schemaVersion(db)).toBe(LATEST_VERSION);
       expect(db.prepare("SELECT session_id, kept_at FROM sessions").all()).toEqual([
@@ -1249,6 +1272,48 @@ describe("migration 17 → current: API concurrency", () => {
       expect(db.prepare("SELECT max_concurrent_runs FROM agent_api").get()).toEqual({
         max_concurrent_runs: 9,
       });
+    } finally {
+      db.close();
+    }
+  });
+});
+
+/** A database stamped at migration 18: everything before the model health memory. */
+function open18(): DatabaseSync {
+  const db = new sqlite.DatabaseSync(":memory:");
+  db.exec(SCHEMA_SQL);
+  dropModelHealth(db);
+  db.exec("PRAGMA user_version = 18");
+  return db;
+}
+
+describe("migration 18 → current: model-health", () => {
+  const healthTableExists = (db: DatabaseSync) =>
+    db
+      .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'model_health'")
+      .get();
+
+  it("creates the health table, and its down drops it again", () => {
+    const db = open18();
+    try {
+      expect(healthTableExists(db)).toBeUndefined();
+      expect(migrate(db).applied).toEqual(["model-health"]);
+      expect(schemaVersion(db)).toBe(LATEST_VERSION);
+      expect(healthTableExists(db)).toEqual({ ok: 1 });
+      rollbackTo(db, 18);
+      expect(healthTableExists(db)).toBeUndefined();
+      expect(migrate(db).applied).toEqual(["model-health"]);
+      expect(healthTableExists(db)).toEqual({ ok: 1 });
+    } finally {
+      db.close();
+    }
+  });
+
+  it("is safe to create while a pushed platform boots", () => {
+    const db = open18();
+    try {
+      expect(migrate(db, { swapPath: true }).applied).toEqual(["model-health"]);
+      expect(schemaVersion(db)).toBe(LATEST_VERSION);
     } finally {
       db.close();
     }

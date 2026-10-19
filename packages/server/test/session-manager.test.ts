@@ -48,6 +48,7 @@ import path from "node:path";
 import {
   Environment,
   Session,
+  SERVER_SHUTDOWN_ABORT_REASON,
   abortEvent,
   approvalDecision,
   assistantText,
@@ -84,6 +85,9 @@ import type { ChannelEvent } from "../src/runtime/channel.js";
 import type { ErrorRecordArgs, ErrorSink } from "../src/runtime/error-recorder.js";
 import { SessionManager, FOLLOW_UP_QUEUE_LIMIT } from "../src/runtime/session-manager.js";
 import type { RuntimeSession, SessionLoader } from "../src/runtime/session-manager.js";
+import type { ModelHealthMemory } from "../src/runtime/session-manager.js";
+import { createFileRunMarkStore } from "../src/runtime/run-marks.js";
+import type { RunMarkStore } from "../src/runtime/run-marks.js";
 import { SessionSources } from "../src/runtime/session-sources.js";
 import type { TitleRequest } from "../src/runtime/title-generator.js";
 import type { UsageContext } from "../src/runtime/usage-recorder.js";
@@ -182,6 +186,10 @@ describe("session-manager", () => {
     now?: () => Date,
     /** The Project's fallback chain, for the rate-limit failover (see RuntimeEntry.pendingFailover). */
     fallbackChainOf?: (projectId: string) => Promise<{ provider: string; modelId: string }[]>,
+    /** Durable run-mark storage, for the restart-resume tests (absent everywhere else). */
+    runMarks?: RunMarkStore,
+    /** Health memory fake, for the failover skip tests (absent everywhere else). */
+    modelHealth?: ModelHealthMemory,
   ): SessionManager =>
     new SessionManager({
       sessions,
@@ -189,6 +197,7 @@ describe("session-manager", () => {
       sources,
       loader,
       ...(fallbackChainOf ? { fallbackChainOf } : {}),
+      ...(modelHealth ? { modelHealth } : {}),
       recorder: {
         record: async (ctx, msg) => {
           recordedCtx.push(ctx);
@@ -197,6 +206,7 @@ describe("session-manager", () => {
       },
       ...(errors ? { errors } : {}),
       ...(now ? { now } : {}),
+      ...(runMarks ? { runMarks } : {}),
       log: () => {},
     });
 
@@ -1308,6 +1318,62 @@ describe("session-manager", () => {
     expect((compactErr as { status: number }).status).toBe(503);
   });
 
+  it("run marks: a finished run clears its mark", async () => {
+    sessions.updateApprovalMode("session-1", "allow-all");
+    const root = await mkdtemp(path.join(tmpdir(), "run-marks-"));
+    try {
+      const runMarks = createFileRunMarkStore(root, { onError: () => {} });
+      const manager = makeManager(
+        loaderOf(approvalFakeSession("session-1")),
+        undefined,
+        undefined,
+        undefined,
+        runMarks,
+      );
+      await manager.startTask("session-1", [userText("hello")]);
+      await waitFor(() => manager.statusOf("session-1") === "idle");
+      expect(runMarks.listMarks()).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("run marks: shutdown keeps the mark with the server reason; a user abort clears it", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "run-marks-"));
+    try {
+      const runMarks = createFileRunMarkStore(root, { onError: () => {} });
+      const reasons: unknown[] = [];
+      const held = fakeSession("session-1", {
+        async *run(_input: OmniMessage[], opts: { approve: ApproveFn; signal: AbortSignal }) {
+          yield assistantText("working");
+          await new Promise<void>((resolve) =>
+            opts.signal.addEventListener("abort", () => resolve(), { once: true }),
+          );
+          reasons.push(opts.signal.reason);
+        },
+      });
+      // The server's own shutdown: the mark survives for the next boot to resume.
+      const manager = makeManager(loaderOf(held), undefined, undefined, undefined, runMarks);
+      await manager.startTask("session-1", [userText("one")]);
+      await waitFor(() => runMarks.listMarks().length === 1);
+      await manager.shutdown();
+      expect(runMarks.listMarks().map((m) => m.sessionId)).toEqual(["session-1"]);
+      expect(reasons).toEqual([SERVER_SHUTDOWN_ABORT_REASON]);
+      // A person's stop is never resurrected: the mark goes with the run.
+      reasons.length = 0;
+      const manager2 = makeManager(loaderOf(held), undefined, undefined, undefined, runMarks);
+      await manager2.startTask("session-1", [userText("two")]);
+      await waitFor(() => manager2.statusOf("session-1") === "running");
+      expect(manager2.abortTask("session-1")).toBe(true);
+      await waitFor(() => manager2.statusOf("session-1") === "idle");
+      expect(runMarks.listMarks()).toEqual([]);
+      expect(reasons).toHaveLength(1);
+      expect(reasons[0]).not.toBe(SERVER_SHUTDOWN_ABORT_REASON);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("sweepIdle: entries idle past the timeout are evicted (reloaded via the loader on next access)", async () => {
     let loads = 0;
     const loader: SessionLoader = {
@@ -1778,5 +1844,124 @@ describe("session-manager", () => {
     expect(fake.modelId).toBe("m-beta");
     expect(runs).toEqual(["m-alpha", "m-beta"]);
     expect(manager.statusOf("session-1")).toBe("idle");
+  });
+
+  it("failover jumps over models the health memory rules out, in chain order", async () => {
+    const switched: Array<{ provider: string; modelId: string }> = [];
+    const fake = {
+      sessionId: "session-1",
+      provider: "custom",
+      modelId: "m-alpha",
+      toolPermission: () => "rw" as const,
+      generateTitle: async () => ({ title: null, usage: null }),
+      compactability: () => "ok" as const,
+      steer: () => false,
+      skipReconnectWait: () => false,
+      async *run(): AsyncGenerator<OmniMessage> {
+        yield requestBegin();
+        if (fake.modelId === "m-alpha") {
+          yield requestEnd("retryable", { errorCode: "rate_limited" });
+          return;
+        }
+        yield assistantText("answered past the skipped model");
+        yield requestEnd("completed");
+      },
+      async *compact(): AsyncGenerator<OmniMessage> {},
+      async *switchModel(opts: {
+        provider: string;
+        modelId: string;
+      }): AsyncGenerator<OmniMessage, StopReason> {
+        switched.push({ provider: opts.provider, modelId: opts.modelId });
+        (fake as { provider: string; modelId: string }).provider = opts.provider;
+        (fake as { provider: string; modelId: string }).modelId = opts.modelId;
+        return "completed";
+      },
+    } as unknown as RuntimeSession;
+    const modelHealth: ModelHealthMemory = {
+      // m-beta learned 10 consecutive failures before this Session ever ran.
+      skippedModels: () => ["custom/m-beta"],
+      noteRequestEnd: () => {},
+    };
+    const manager = makeManager(
+      loaderOf(fake),
+      undefined,
+      undefined,
+      async () => [
+        { provider: "custom", modelId: "m-alpha" },
+        { provider: "custom", modelId: "m-beta" },
+        { provider: "custom", modelId: "m-gamma" },
+      ],
+      undefined,
+      modelHealth,
+    );
+
+    await manager.startTask("session-1", [userText("hi")]);
+    await waitFor(() => manager.statusOf("session-1") === "idle" && switched.length === 1, 5000);
+
+    expect(switched).toEqual([{ provider: "custom", modelId: "m-gamma" }]);
+    expect(fake.modelId).toBe("m-gamma");
+  });
+
+  it("every request end is noted to the health memory: the failure, then the success that clears it", async () => {
+    const noted: Array<{
+      projectId: string;
+      provider: string;
+      modelId: string;
+      errorCode: string | undefined;
+    }> = [];
+    const fake = {
+      sessionId: "session-1",
+      provider: "custom",
+      modelId: "m-alpha",
+      toolPermission: () => "rw" as const,
+      generateTitle: async () => ({ title: null, usage: null }),
+      compactability: () => "ok" as const,
+      steer: () => false,
+      skipReconnectWait: () => false,
+      async *run(): AsyncGenerator<OmniMessage> {
+        yield requestBegin();
+        if (fake.modelId === "m-alpha") {
+          yield requestEnd("retryable", { errorCode: "rate_limited" });
+          return;
+        }
+        yield assistantText("answered on the fallback");
+        yield requestEnd("completed");
+      },
+      async *compact(): AsyncGenerator<OmniMessage> {},
+      async *switchModel(opts: {
+        provider: string;
+        modelId: string;
+      }): AsyncGenerator<OmniMessage, StopReason> {
+        (fake as { provider: string; modelId: string }).provider = opts.provider;
+        (fake as { provider: string; modelId: string }).modelId = opts.modelId;
+        return "completed";
+      },
+    } as unknown as RuntimeSession;
+    const modelHealth: ModelHealthMemory = {
+      skippedModels: () => [],
+      noteRequestEnd: (projectId, provider, modelId, errorCode) => {
+        noted.push({ projectId, provider, modelId, errorCode });
+      },
+    };
+    const manager = makeManager(
+      loaderOf(fake),
+      undefined,
+      undefined,
+      async () => [
+        { provider: "custom", modelId: "m-alpha" },
+        { provider: "custom", modelId: "m-beta" },
+      ],
+      undefined,
+      modelHealth,
+    );
+
+    await manager.startTask("session-1", [userText("hi")]);
+    await waitFor(() => manager.statusOf("session-1") === "idle" && noted.length === 2, 5000);
+
+    // The model that ran is the model blamed (or cleared): the entry follows the runtime.
+    expect(noted).toEqual([
+      { projectId: "p1", provider: "custom", modelId: "m-alpha", errorCode: "rate_limited" },
+      { projectId: "p1", provider: "custom", modelId: "m-beta", errorCode: undefined },
+    ]);
   });
 });

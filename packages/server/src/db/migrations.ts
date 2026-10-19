@@ -676,6 +676,38 @@ export const MIGRATIONS: readonly Migration[] = [
     // Keep the configured limit on rollback; older builds ignore this column.
     down() {},
   },
+  {
+    version: 19,
+    name: "model-health",
+    // Additive: one new table. Per-Project per-model failover memory (consecutive
+    // transport-failure counts + manual quality bans). A predecessor build never reads it
+    // and fails over by the chain alone as it always did, so a rollback survives it.
+    swapSafe: true,
+    up(db) {
+      // Frozen copy of the DDL as of the model-health landing; do not re-derive from schema.ts.
+      // IF NOT EXISTS because the declarative track may already have created it (ADOPTION).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS model_health ( -- Per-Project per-model health memory for failover: consecutive transport-failure counts (reset by any success) and manual quality-failure bans. Read by failover target selection (a Project-local echo of tracker's ph_model_pool failure memory); lost rows only mean the next failover round re-learns from zero.
+          project_id      TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+          provider        TEXT NOT NULL,
+          model_id        TEXT NOT NULL,
+          failures        INTEGER NOT NULL DEFAULT 0,  -- consecutive counted failures (rate_limited/timeout/network/connect_failed); a success resets it
+          last_error      TEXT,                        -- the counted error code of the last failure
+          last_failure_at TEXT,                        -- ISO instant of the last counted failure
+          qfail_count     INTEGER NOT NULL DEFAULT 0,  -- consecutive manual quality failures; QUALITY_FAIL_THRESHOLD within the cooldown bans the model
+          qfail_at        TEXT,                        -- ISO instant of the last quality failure
+          qfail_reason    TEXT,                        -- reason of the last quality failure
+          updated_at      TEXT NOT NULL,
+          PRIMARY KEY (project_id, provider, model_id)
+        );
+      `);
+    },
+    // LOSES the learned failure counts and the quality bans: the next failover round
+    // re-learns transport health from zero, and banned models become eligible again.
+    down(db) {
+      db.exec("DROP TABLE IF EXISTS model_health");
+    },
+  },
 ];
 
 /** The highest version this build knows how to reach. */

@@ -97,6 +97,7 @@ import type {
   EndpointModelListRequest,
   EndpointModelListResponse,
   ModelEffectiveConnection,
+  ModelHealthDto,
   ModelInfo,
   ModelPricingDto,
   ModelProtocolDetectRequest,
@@ -112,6 +113,7 @@ import type {
   PresetSyncResponse,
   ProviderConnectionDto,
   ProviderConnectionUpdate,
+  QualityReportResponse,
 } from "../api/types.js";
 import { badRequest } from "../http/validate.js";
 import { HttpError } from "../http/errors.js";
@@ -132,7 +134,9 @@ import {
 } from "./vision-detect.js";
 import type { PricingRates, TieredRates } from "./usage-service.js";
 import { Component, Use } from "@prismshadow/penguin-core/kernel";
-import type { Config, Paths } from "../hmr/capabilities.js";
+import type { Config, Db, Paths } from "../hmr/capabilities.js";
+import type { DatabaseSync } from "node:sqlite";
+import { ModelHealthRepo } from "../db/repos/model-health.js";
 import type {
   ModelPromotion,
   ModelProviderAuthToken,
@@ -791,6 +795,8 @@ export class ProjectConfigService implements ProjectConfigStore {
   @Use() private readonly promotions?: ModelPromotions;
   /** Optional for narrow service tests; OAuth refresh metadata lives in web.db, not TOML. */
   @Use() private readonly providerAuthTokens?: ModelProviderAuthTokens;
+  /** Optional for narrow service tests; the health memory behind the three methods below. */
+  @Use() private readonly db?: Db;
   private get root(): string {
     return this.paths.root;
   }
@@ -1059,6 +1065,54 @@ export class ProjectConfigService implements ProjectConfigStore {
       next.model_fallback_chain = refs.map((r) => ({ provider: r.provider, model_id: r.modelId }));
     await this.writeRaw(projectId, next);
     return refs.map((r) => ({ provider: r.provider, modelId: r.modelId }));
+  }
+
+  private healthRepo(): ModelHealthRepo {
+    if (this.db === undefined) {
+      throw new HttpError(503, "model_health_unavailable", "Model health memory is unavailable.");
+    }
+    return new ModelHealthRepo(this.db as unknown as DatabaseSync);
+  }
+
+  /** Health memory rows of the Project, bans resolved at read time (no db = no memory = no rows). */
+  async getModelHealth(projectId: string): Promise<ModelHealthDto[]> {
+    if (this.db === undefined) return [];
+    return new ModelHealthRepo(this.db as unknown as DatabaseSync).list(projectId, Date.now());
+  }
+
+  /** Records one manual quality failure; answers the count and whether the ban is now in force. */
+  async reportQualityFailure(
+    projectId: string,
+    provider: string,
+    modelId: string,
+    reason: string,
+  ): Promise<QualityReportResponse> {
+    const { count, banned } = this.healthRepo().noteQualityFailure(
+      projectId,
+      provider,
+      modelId,
+      reason,
+      new Date().toISOString(),
+    );
+    return { provider, modelId, count, banned };
+  }
+
+  /**
+   * Forgets health — transport failures, quality bans, or both — for one model or the
+   * whole Project. Answers how many rows it touched.
+   */
+  async clearModelHealth(
+    projectId: string,
+    scope: "failures" | "quality" | "all",
+    provider?: string,
+    modelId?: string,
+  ): Promise<{ cleared: number }> {
+    const repo = this.healthRepo();
+    let cleared = 0;
+    if (scope === "failures" || scope === "all") cleared += repo.clearFailures(projectId, provider, modelId);
+    if (scope === "quality" || scope === "all")
+      cleared += repo.clearQualityFailures(projectId, provider, modelId);
+    return { cleared };
   }
 
   /**

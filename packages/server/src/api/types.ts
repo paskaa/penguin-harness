@@ -532,6 +532,36 @@ export interface ModelRefDto {
   modelId: string;
 }
 
+/**
+ * One remembered model's health: consecutive transport failures (a success resets) and
+ * manual quality bans. Read by failover target selection; written by request ends and
+ * the quality report endpoint.
+ */
+export interface ModelHealthDto {
+  provider: string;
+  modelId: string;
+  failures: number;
+  lastError: string | null;
+  lastFailureAt: string | null;
+  qfailCount: number;
+  qfailAt: string | null;
+  qfailReason: string | null;
+  qualityBanned: boolean;
+}
+
+/** Health memory rows of one Project, bans resolved at read time. */
+export interface ModelHealthListResponse {
+  health: ModelHealthDto[];
+}
+
+/** What one manual quality report left behind: the count, and whether the ban is now in force. */
+export interface QualityReportResponse {
+  provider: string;
+  modelId: string;
+  count: number;
+  banned: boolean;
+}
+
 /** Three pricing buckets, in USD per million tokens (unit is fixed at usd_per_mtok; not carried in the DTO). */
 export interface ModelPricingDto {
   cacheRead: number;

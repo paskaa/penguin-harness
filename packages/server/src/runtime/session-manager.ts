@@ -104,7 +104,9 @@ import { TitleGenerator } from "./title-generator.js";
 import { loopbackHostRoles } from "../services/preview-token.js";
 import { agentNoProxy } from "../net/proxy.js";
 import type { SandboxService } from "../sandbox/service.js";
-import type { AuthState, Channels, Clock, Config, Log } from "../hmr/capabilities.js";
+import type { DatabaseSync } from "node:sqlite";
+import type { AuthState, Channels, Clock, Config, Db, Log } from "../hmr/capabilities.js";
+import { ModelHealthRepo } from "../db/repos/model-health.js";
 import type { ProjectConfigStore, ProjectEvents } from "../mechanisms/projects.js";
 import type { AgentState, SessionIndex, SessionOrigins } from "../mechanisms/sessions.js";
 import type { Errors, UsageRecording } from "../mechanisms/observability.js";
@@ -457,6 +459,23 @@ export interface UsageRecorderLike {
   record(ctx: UsageContext, msg: OmniMessage): Promise<void>;
 }
 
+/**
+ * The slice of the model-health memory the failover path needs. `ModelHealthRepo`
+ * implements it structurally; tests fake it.
+ */
+export interface ModelHealthMemory {
+  /** Models failover must skip, as `provider/modelId` keys (the tried-set's shape, so the two union). */
+  skippedModels(projectId: string, nowMs: number): string[];
+  /** Records one request end for the model that ran it (`errorCode` undefined = success, resets the count). */
+  noteRequestEnd(
+    projectId: string,
+    provider: string,
+    modelId: string,
+    errorCode: string | undefined,
+    nowIso: string,
+  ): void;
+}
+
 export interface SessionManagerDeps {
   /** The in-memory state this manager works on (see agent-state.ts). Optional: a manager built without one — unit tests — gets an empty state of its own. */
   state?: AgentState;
@@ -502,6 +521,16 @@ export interface SessionManagerDeps {
    * assembly that predates it gets.
    */
   fallbackChainOf?: (projectId: string) => Promise<ModelRefDto[]>;
+  /**
+   * Per-Project per-model health memory (see db/repos/model-health.ts): consecutive
+   * transport-failure counts and quality bans. Every request end is noted (a success
+   * resets), and failover target selection skips what the memory rules out — the chain
+   * order still decides among the rest. Absent = chain alone, which is what unit tests
+   * and assemblies that predate it get.
+   */
+  modelHealth?: ModelHealthMemory;
+  /**
+   */
 }
 
 /**
@@ -591,7 +620,7 @@ export interface RuntimeEntry {
   /** Models this Session has already been moved onto for rate limiting, so a chain that 429s everywhere stops. */
   failoverTried: Set<string>;
   /** How the last LLM request of the latest run ended, for the failover decision above. */
-  lastRequestEnd?: { rateLimited: boolean };
+  lastRequestEnd?: { rateLimited: boolean; errorCode?: string };
   /**
    * The running Task's input messages, held from launch until the run ends. The engine
    * writes these exact envelopes to the Trace only after the session bootstrap (MCP
@@ -1479,6 +1508,25 @@ export class SessionManager {
     try {
       const end = entry.lastRequestEnd;
       entry.lastRequestEnd = undefined;
+      // The health memory learns from every request end, whatever it was: a success
+      // resets the model's consecutive count, a counted failure raises it. Noting never
+      // decides anything — selection reads the memory below — so a throw here must not
+      // take the failover decision below it down.
+      if (end !== undefined && this.deps.modelHealth !== undefined) {
+        try {
+          this.deps.modelHealth.noteRequestEnd(
+            entry.projectId,
+            entry.provider,
+            entry.modelId,
+            end.errorCode,
+            (this.deps.now?.() ?? new Date()).toISOString(),
+          );
+        } catch (err) {
+          this.log(
+            `[failover] health note failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
       if (end?.rateLimited !== true || input.length === 0) return;
       const target = await this.nextFailoverTarget(entry);
       if (target === undefined) return;
@@ -1499,15 +1547,34 @@ export class SessionManager {
 
   /**
    * Where a rate-limited Session should run next: the Project's fallback chain, minus the
-   * model it is already on and anything this Session has been moved onto before. Undefined
-   * when the chain is unset or exhausted — the turn then ends as it always has.
+   * model it is already on, anything this Session has been moved onto before, and anything
+   * the health memory rules out. Undefined when the chain is unset or exhausted — the turn
+   * then ends as it always has. A memory that will not answer fails open to the chain
+   * alone: a blind target beats no target.
    */
   private async nextFailoverTarget(
     entry: RuntimeEntry,
   ): Promise<{ provider: string; modelId: string } | undefined> {
     if (entry.session.switchModel === undefined) return undefined;
     const chain = await (this.deps.fallbackChainOf?.(entry.projectId) ?? Promise.resolve([]));
-    return nextFailoverTarget(chain, entry, entry.failoverTried);
+    let skip: ReadonlySet<string> = entry.failoverTried;
+    if (this.deps.modelHealth !== undefined) {
+      try {
+        const union = new Set(entry.failoverTried);
+        for (const key of this.deps.modelHealth.skippedModels(
+          entry.projectId,
+          (this.deps.now?.() ?? new Date()).getTime(),
+        )) {
+          union.add(key);
+        }
+        skip = union;
+      } catch (err) {
+        this.log(
+          `[failover] health read failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    return nextFailoverTarget(chain, entry, skip);
   }
 
   /**
@@ -1526,6 +1593,10 @@ export class SessionManager {
     const gen = entry.session.switchModel({ ...target, signal: ac.signal });
     entry.running = this.drive(entry, gen);
     await entry.running;
+    // The entry follows the runtime it just moved onto (the manual switch does the same):
+    // without this, usage — and the health memory's noting — keeps attributing to the model
+    // that was left behind, and the next failover round skips the wrong "current" model.
+    this.syncEntryModel(entry);
   }
 
   /**
@@ -2492,7 +2563,12 @@ export class SessionManager {
             error_code?: string;
           };
           if (endPayload.type === "request_end") {
-            entry.lastRequestEnd = { rateLimited: endPayload.error_code === "rate_limited" };
+            entry.lastRequestEnd = {
+              rateLimited: endPayload.error_code === "rate_limited",
+              ...(endPayload.error_code !== undefined
+                ? { errorCode: endPayload.error_code }
+                : {}),
+            };
           }
           // First request of the run: the engine writes input → bootstrap records → tool
           // list to the Trace BEFORE issuing the request, so both holds are persisted by
@@ -2925,6 +3001,7 @@ export class SessionsModule {
   @Use() private readonly messagingRepo!: MessagingBindings;
   /** Company-mode caches: which organization owns a Session (read at every command spawn). */
   @Use() private readonly orgCache!: OrgCache;
+  @Use() private readonly db!: Db;
   @Provide() manager!: Sessions;
   @Provide() sessionService!: SessionServiceIface;
   @Provide() env!: SessionEnv;
@@ -3045,6 +3122,22 @@ export class SessionsModule {
         if (orgCache.ownerOfSession(sessionId) !== null) orgCache.setTriggerHop(sessionId, 0);
       },
       fallbackChainOf: (projectId) => this.projectConfig.getFallbackChain(projectId),
+      // Model health memory (failover skips + request-end noting): the repo is sync
+      // sqlite, so the closures below never block the loop beyond one statement.
+      modelHealth: (() => {
+        const repo = new ModelHealthRepo(this.db as unknown as DatabaseSync);
+        return {
+          skippedModels: (projectId: string, nowMs: number) =>
+            repo.skippedModels(projectId, nowMs),
+          noteRequestEnd: (
+            projectId: string,
+            provider: string,
+            modelId: string,
+            errorCode: string | undefined,
+            nowIso: string,
+          ) => repo.noteRequestEnd(projectId, provider, modelId, errorCode, nowIso),
+        };
+      })(),
       now: () => this.clock.now(),
     });
     const sessionService = new SessionService({
