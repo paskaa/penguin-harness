@@ -109,7 +109,7 @@ import { agentNoProxy } from "../net/proxy.js";
 import type { SandboxService } from "../sandbox/service.js";
 import type { DatabaseSync } from "node:sqlite";
 import type { AuthState, Channels, Clock, Config, Db, Log } from "../hmr/capabilities.js";
-import { ModelHealthRepo } from "../db/repos/model-health.js";
+import { COUNTED_ERROR_CODES, ModelHealthRepo } from "../db/repos/model-health.js";
 import type { ProjectConfigStore, ProjectEvents } from "../mechanisms/projects.js";
 import type { AgentState, SessionIndex, SessionOrigins } from "../mechanisms/sessions.js";
 import type { Errors, UsageRecording } from "../mechanisms/observability.js";
@@ -161,7 +161,19 @@ function compactUnavailable(why: Exclude<CompactAvailability, "ok">): HttpError 
  * dressed up as a target problem.
  */
 /**
- * The next model a rate-limited Session should run on: the first entry of the Project's
+ * Whether a run's last request end is worth moving models over: the transport said no,
+ * not the request — a 429 (the engine ends the turn on the first one when a chain
+ * exists), or a reconnect ladder the retries did not recover (`timeout`/`network`/
+ * `connect_failed` once the attempts are spent). The health memory's counted set, so
+ * the two never disagree about what "the model failed" means; a refused request
+ * (`auth`/`rejected`/…) fails identically on every model and never moves.
+ */
+export function isFailoverEligibleEnd(errorCode: string | undefined): boolean {
+  return errorCode !== undefined && COUNTED_ERROR_CODES.has(errorCode);
+}
+
+/**
+ * The next model a failed-over Session should run on: the first entry of the Project's
  * fallback chain that is neither the model the Session is already on nor one it has already
  * been moved onto. Undefined when the chain is unset or exhausted, which is when the turn
  * ends as it always has rather than cycling.
@@ -535,7 +547,7 @@ export interface SessionManagerDeps {
    */
   onHumanInput?: (sessionId: string) => void;
   /**
-   * The Project's model fallback chain, in priority order: where a rate-limited Session is
+   * The Project's model fallback chain, in priority order: where a failed-over Session is
    * moved next (see `RuntimeEntry.pendingFailover`). Absent = no failover, which is what an
    * assembly that predates it gets.
    */
@@ -631,12 +643,12 @@ export interface RuntimeEntry {
    */
   followUps: QueuedFollowUp[];
   /**
-   * The model move this Session owes itself: set when a turn ended rate-limited and the
-   * Project's fallback chain still has somewhere to run it (see queueFailover). The move
-   * happens at a Task boundary, and the resent turn rides the queue behind it.
+   * The model move this Session owes itself: set when a turn ended on a transport failure
+   * and the Project's fallback chain still has somewhere to run it (see queueFailover). The
+   * move happens at a Task boundary, and the resent turn rides the queue behind it.
    */
   pendingFailover?: { provider: string; modelId: string };
-  /** Models this Session has already been moved onto for rate limiting, so a chain that 429s everywhere stops. */
+  /** Models this Session has already been moved onto by failover, so a chain that fails everywhere stops. */
   failoverTried: Set<string>;
   /** How the last LLM request of the latest run ended, for the failover decision above. */
   lastRequestEnd?: { rateLimited: boolean; errorCode?: string };
@@ -1491,6 +1503,9 @@ export class SessionManager {
     // its own connect phase, and a stale aborted pair would render as an extra row.
     entry.pendingInputs = [...entry.pendingInputs, ...input];
     entry.pendingBootstrap = [];
+    // Fresh run, fresh failover decision: a switch/compaction drive may have left its own
+    // last request end behind (only Task runs consume it in afterRun).
+    entry.lastRequestEnd = undefined;
     this.publishState(entry, "running");
 
     const approve = this.entryApprove(entry);
@@ -1511,8 +1526,8 @@ export class SessionManager {
   }
 
   /**
-   * A run just ended: when the turn came back rate-limited and the Project's fallback chain
-   * still has somewhere to run it, queue the move and the resent turn.
+   * A run just ended: when the turn came back on a transport failure and the Project's
+   * fallback chain still has somewhere to run it, queue the move and the resent turn.
    *
    * The move itself happens at the next Task boundary (`startQueuedFollowUp` → `runFailover`):
    * switching a Session closes its context and opens another, which is not something to do
@@ -1541,7 +1556,7 @@ export class SessionManager {
           );
         }
       }
-      if (end?.rateLimited !== true || input.length === 0) return;
+      if (!isFailoverEligibleEnd(end?.errorCode) || input.length === 0) return;
       const target = await this.nextFailoverTarget(entry);
       if (target === undefined) return;
       entry.pendingFailover = target;
@@ -1550,7 +1565,7 @@ export class SessionManager {
       // finish, not a new one.
       entry.followUps.unshift({ id: randomUUID(), input, recall: recallStoreOf(input) });
       this.log(
-        `[failover] ${entry.sessionId} moves to ${target.provider}/${target.modelId} after a rate limit`,
+        `[failover] ${entry.sessionId} moves to ${target.provider}/${target.modelId} after ${end?.errorCode}`,
       );
       // The run's own finally may have found an empty queue; there is one now.
       if (entry.status === "idle") void this.startQueuedFollowUp(entry.sessionId);
@@ -1560,7 +1575,7 @@ export class SessionManager {
   }
 
   /**
-   * Where a rate-limited Session should run next: the Project's fallback chain, minus the
+   * Where a failed-over Session should run next: the Project's fallback chain, minus the
    * model it is already on, anything this Session has been moved onto before, and anything
    * the health memory rules out. Undefined when the chain is unset or exhausted — the turn
    * then ends as it always has. A memory that will not answer fails open to the chain
@@ -2644,6 +2659,11 @@ export class SessionManager {
     } finally {
       // A stream that yielded nothing still echoes its input, ahead of the idle flip.
       echo.flush();
+      // A stopped run never fails over: the last request end may be an intermediate
+      // retryable one (a stop during the reconnect backoff leaves no terminal end),
+      // and resending the turn the user just stopped — on another model — would defy
+      // the stop. Captured before the teardown below nulls the controller.
+      if (entry.abort?.signal.aborted === true) entry.lastRequestEnd = undefined;
       // Wrap-up: persist any still-pending LLM failure and clear the tool-name cache (the watcher's state doesn't carry across runs).
       watcher?.close();
       // The run is over: no fragment will ever continue, so drop the live tail before the
