@@ -289,12 +289,18 @@ describe("scheduler", () => {
     ]);
     await scheduler.tickOnce();
     expect(started).toHaveLength(0);
-    expect(repo.find(P, A, "stale")?.missed).toBe(true);
+    // Already expired at registration: marked missed, then archived out of the listing
+    // (file moved, run state dropped), so it never fires.
+    expect(repo.find(P, A, "stale")).toBeNull();
+    expect(await fs.readdir(path.join(scheduleDir(root, P, A), "expired"))).toEqual([
+      "stale.toml",
+    ]);
 
     nowMs = T0 + 11 * MIN;
     await scheduler.tickOnce();
     expect(started).toHaveLength(1);
-    expect(repo.find(P, A, "future")?.firedOnce).toBe(true);
+    // Fired once: archived out of the listing, so later slots never refire it.
+    expect(repo.find(P, A, "future")).toBeNull();
 
     nowMs = T0 + 60 * MIN;
     await scheduler.tickOnce();
@@ -513,7 +519,11 @@ describe("scheduler", () => {
     nowMs = T0 + 60 * MIN;
     await scheduler.tickOnce();
     expect(started).toHaveLength(2);
-    expect(repo.find(P, A, "oneshot")?.firedOnce).toBe(true);
+    // The real firing sets fired_once and archives the one-shot out of the listing.
+    expect(repo.find(P, A, "oneshot")).toBeNull();
+    expect(await fs.readdir(path.join(scheduleDir(root, P, A), "expired"))).toEqual([
+      "oneshot.toml",
+    ]);
   });
 
   it("fireNow queues behind a busy Session and sends once idle, still without consuming", async () => {

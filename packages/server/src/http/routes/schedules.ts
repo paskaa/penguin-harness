@@ -234,6 +234,28 @@ export function scheduleRoutes(deps: SchedulesRouteDeps): Hono<AppEnv> {
     return c.body(null, 204);
   });
 
+  // Fire once now (a hand trigger): the same dispatch as a due slot, but an extra run
+  // that never consumes the schedule — owner-only like every other write, member reads.
+  app.post("/:name/fire", async (c) => {
+    const projectId = requireValidId(c, "projectId");
+    const agentId = requireValidId(c, "agentId");
+    deps.access.requireProjectOwner(c.var.user.userId, projectId);
+    await deps.agentConfigService.requireExists(projectId, agentId);
+    const name = requireScheduleName(c.req.param("name"));
+    try {
+      const fired = await deps.scheduler.fireNow(projectId, agentId, name);
+      const res: ScheduleFireResponse = { sessionId: fired.sessionId, queued: fired.queued };
+      return c.json(res);
+    } catch (err) {
+      if (err instanceof ScheduleFireError) {
+        if (err.code === "schedule_not_found") throw new HttpError(404, err.code, err.message);
+        if (err.code === "schedule_fire_failed") throw new HttpError(500, err.code, err.message);
+        throw new HttpError(400, err.code, err.message);
+      }
+      throw err;
+    }
+  });
+
   // Lift an auto-pause (owner): the ticks run again and the count behind the pause is
   // forgotten. Answers whether anything was paused; a file edit clears the same state,
   // so this is the no-edit way back.
@@ -321,28 +343,7 @@ async function upsert(
     startAtMs: parsed.def.startAtMs,
     defHash: createHash("sha1").update(raw).digest("hex"),
     creatorUserId: userId,
-  })
-
-  app.post("/:name/fire", async (c) => {
-    const projectId = requireValidId(c, "projectId");
-    const agentId = requireValidId(c, "agentId");
-    deps.access.requireProjectOwner(c.var.user.userId, projectId);
-    await deps.agentConfigService.requireExists(projectId, agentId);
-    const name = requireScheduleName(c.req.param("name"));
-    try {
-      const fired = await deps.scheduler.fireNow(projectId, agentId, name);
-      const res: ScheduleFireResponse = { sessionId: fired.sessionId, queued: fired.queued };
-      return c.json(res);
-    } catch (err) {
-      if (err instanceof ScheduleFireError) {
-        if (err.code === "schedule_not_found") throw new HttpError(404, err.code, err.message);
-        if (err.code === "schedule_fire_failed") throw new HttpError(500, err.code, err.message);
-        throw new HttpError(400, err.code, err.message);
-      }
-      throw err;
-    }
   });
-;
   await deps.scheduler.reconcileAgent(projectId, agentId);
 }
 

@@ -185,10 +185,9 @@ describe("schedules api", () => {
     );
     const list = (await (await owner.get(base)).json()) as SchedulesResponse;
     expect(list.invalidFiles.map((f) => f.name)).toEqual(["broken"]);
-    const stale = list.schedules.find((s) => s.name === "stale");
-    expect(stale?.status).toBe("missed");
-    // For a hand-edited file, the creator falls back to the Project owner.
-    expect(stale?.creatorUserId).toBe("owner_a");
+    // Marked missed, then archived out of the listing (settled tasks never list).
+    expect(list.schedules.find((s) => s.name === "stale")).toBeUndefined();
+    expect(await fs.readdir(path.join(dir, "expired"))).toEqual(["stale.toml"]);
   });
 
   it("a hand-edited file is reconciled past a warm mtime cache (an in-place edit moves only the file's mtime)", async () => {
