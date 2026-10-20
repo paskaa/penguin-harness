@@ -1927,6 +1927,13 @@ export interface SessionInfo {
    */
   archived: boolean;
   /**
+   * When the user archived this Session by hand (ISO 8601, the convention of `createdAt` and
+   * `lastActiveAt`); null or absent when they did not — a program opened it and the listing
+   * rule files it away, which has no moment of its own. The archive page shows it, so "when
+   * did I file this conversation away" has an answer next to the conversation's name.
+   */
+  archivedAt?: string | null;
+  /**
    * What this Session's records add up to, present only when the request asked for it
    * (`withStats=1`): the counters a row badge shows (turns / tool calls / produced files) and
    * what it was last doing. Absent means "not asked for", never "none happened".

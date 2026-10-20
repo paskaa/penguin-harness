@@ -446,6 +446,9 @@ export class SessionService {
       pendingFollowUpCount: this.deps.manager.pendingFollowUpCount(row.sessionId),
       hasTrace,
       archived: listCategory(source, listingMarksOf(row)) === "archived",
+      // When the user filed it away by hand — the archive page shows this, so a conversation
+      // that was archived can be found by the moment it was archived.
+      archivedAt: row.archivedAt ?? null,
       ...(messagingChannel !== null ? { messagingChannel } : {}),
       ...(orgId !== undefined ? { orgId } : {}),
       ...(row.client !== null && row.client !== undefined ? { client: row.client } : {}),
