@@ -231,6 +231,9 @@ describe("organization routes", () => {
       (await owner.post(`${base}/acme/tickets/2026-09-01-site/move`, { status: "flying" })).status,
     ).toBe(400);
     expect((await owner.post(`${base}/acme/employees`, { title: "HR" })).status).toBe(400); // reportsTo missing
+    expect(
+      (await owner.patch(`${base}/acme/employees/acme_hr`, { machine: 42 })).status,
+    ).toBe(400); // machine mistyped
     // A calendar name the store would not list back is refused here, not written and then lost.
     for (const name of ["bad name", "_daily", "a".repeat(65)]) {
       expect(
@@ -266,6 +269,23 @@ describe("organization routes", () => {
         { orgId: "acme", mission: "Build a marketplace", name: "Acme" },
         "olivia",
       ],
+    });
+  });
+
+
+  it("carries an employee machine pin through hire and patch", async () => {
+    const base = `/api/projects/${ownerProject}/organizations`;
+    await owner.post(`${base}/acme/employees`, {
+      agentId: "acme_hr",
+      title: "HR",
+      reportsTo: "acme_ceo",
+      machine: "local",
+    });
+    expect(calls.at(-1)).toMatchObject({ method: "hire", args: [ownerProject, "acme", { machine: "local" }] });
+    await owner.patch(`${base}/acme/employees/acme_hr`, { machine: null });
+    expect(calls.at(-1)).toMatchObject({
+      method: "patchEmployee",
+      args: [ownerProject, "acme", "acme_hr", { machine: null }],
     });
   });
 

@@ -378,6 +378,7 @@ export function organizationRoutes(deps: OrgRouteDeps): Hono<AppEnv> {
     const budget = optionalNumber(body, "budget", { nonNegative: true });
     const duties = optionalString(body, "duties", { maxLen: 2000 });
     const model = parseModel(body);
+    const machine = optionalString(body, "machine", { minLen: 1, maxLen: 64 });
     const item = await deps.orgService.hire(projectId, orgId, {
       ...(agentId !== undefined ? { agentId } : {}),
       ...(newAgent !== undefined ? { newAgent } : {}),
@@ -388,6 +389,7 @@ export function organizationRoutes(deps: OrgRouteDeps): Hono<AppEnv> {
       ...(budget !== undefined ? { budget } : {}),
       ...(duties !== undefined ? { duties } : {}),
       ...(model !== undefined && model !== null ? { model } : {}),
+      ...(machine !== undefined ? { machine } : {}),
     });
     return c.json(item, 201);
   });
@@ -407,6 +409,9 @@ export function organizationRoutes(deps: OrgRouteDeps): Hono<AppEnv> {
       body.budget === null ? null : optionalNumber(body, "budget", { nonNegative: true });
     const duties = optionalString(body, "duties", { maxLen: 2000 });
     const model = parseModel(body);
+    // null (or "local", or "") pins nowhere: the employee runs on this server.
+    const machine =
+      body.machine === null ? null : optionalString(body, "machine", { maxLen: 64 });
     const item = await deps.orgService.patchEmployee(projectId, orgId, agentId, {
       ...(name !== undefined ? { name } : {}),
       ...(title !== undefined ? { title } : {}),
@@ -415,6 +420,7 @@ export function organizationRoutes(deps: OrgRouteDeps): Hono<AppEnv> {
       ...(budget !== undefined ? { budget } : {}),
       ...(duties !== undefined ? { duties } : {}),
       ...(model !== undefined ? { model } : {}),
+      ...(machine !== undefined ? { machine } : {}),
     });
     return c.json(item);
   });

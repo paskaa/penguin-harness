@@ -130,6 +130,24 @@ describe("org_chart.yaml", () => {
     expect(parsed).toEqual({ ok: true, value: chart });
   });
 
+  it("round-trips an explicit local machine pin, and rejects anything else", () => {
+    const pinned: OrgChart = {
+      employees: [
+        { agentId: "acme_ceo", title: "CEO", reportsTo: null, workspace: ".", machine: "local" },
+      ],
+    };
+    const parsed = parseOrgChart(serializeOrgChart(pinned), "acme");
+    expect(parsed).toEqual({ ok: true, value: pinned });
+    const remote =
+      "employees:\n  - agent_id: acme_ceo\n    title: CEO\n    reports_to: null\n    machine: s25ffaJHXjvUgWSX\n";
+    const r = parseOrgChart(remote, "acme");
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain("machine");
+    const malformed =
+      "employees:\n  - agent_id: acme_ceo\n    title: CEO\n    reports_to: null\n    machine: 'not an id!'\n";
+    expect(parseOrgChart(malformed, "acme").ok).toBe(false);
+  });
+
   it("requires exactly one root and that it is the CEO", () => {
     const noRoot =
       "employees:\n  - agent_id: acme_ceo\n    title: CEO\n    reports_to: acme_hr\n  - agent_id: acme_hr\n    title: HR\n    reports_to: acme_ceo\n";

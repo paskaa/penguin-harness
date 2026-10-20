@@ -485,6 +485,66 @@ describe("organization runtime", () => {
     });
   });
 
+  describe("an employee's machine pin", () => {
+    it("hire stores nothing for local and refuses remote ids", async () => {
+      await createOrg();
+      await service.hire(P, ORG, {
+        newAgent: { agentId: HR },
+        title: "HR",
+        reportsTo: CEO,
+        machine: "local",
+      });
+      const entry = (await service.chart(P, ORG)).employees.find((e) => e.agentId === HR)!;
+      expect(entry).not.toHaveProperty("machine");
+      await expect(
+        service.hire(P, ORG, {
+          newAgent: { agentId: `${ORG}_dev` },
+          title: "Developer",
+          reportsTo: CEO,
+          machine: "s25ffaJHXjvUgWSX",
+        }),
+      ).rejects.toMatchObject({ status: 400 });
+    });
+
+    it("patch clears on null, empty and local, and refuses remote ids", async () => {
+      await createOrg();
+      await service.hire(P, ORG, { newAgent: { agentId: HR }, title: "HR", reportsTo: CEO });
+      // Nothing stored, so nothing to clear — but the call succeeds either way.
+      await service.patchEmployee(P, ORG, HR, { machine: null });
+      await service.patchEmployee(P, ORG, HR, { machine: "" });
+      await service.patchEmployee(P, ORG, HR, { machine: "local" });
+      const entry = (await service.chart(P, ORG)).employees.find((e) => e.agentId === HR)!;
+      expect(entry).not.toHaveProperty("machine");
+      await expect(
+        service.patchEmployee(P, ORG, HR, { machine: "s25ffaJHXjvUgWSX" }),
+      ).rejects.toMatchObject({ status: 400 });
+    });
+
+    it("lists a hand-pinned machine from the chart", async () => {
+      await createOrg();
+      await service.hire(P, ORG, { newAgent: { agentId: HR }, title: "HR", reportsTo: CEO });
+      await fs.writeFile(
+        path.join(orgDir(), "org_chart.yaml"),
+        [
+          "employees:",
+          `  - agent_id: ${CEO}`,
+          "    title: CEO",
+          "    reports_to: null",
+          "    workspace: ceo",
+          `  - agent_id: ${HR}`,
+          "    title: HR",
+          `    reports_to: ${CEO}`,
+          "    workspace: hr",
+          "    machine: local",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      const entry = (await service.chart(P, ORG)).employees.find((e) => e.agentId === HR)!;
+      expect(entry.machine).toBe("local");
+    });
+  });
+
   describe("an employee's model is its desk session's", () => {
     const NEXT = { provider: "custom", modelId: "m-next" };
     const entryOf = async (agentId: string) =>

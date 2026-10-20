@@ -250,6 +250,13 @@ export interface OrgEmployee {
   workspace: string;
   budget?: number;
   model?: { provider: string; modelId: string };
+  /**
+   * The machine this employee's sessions run on. Single-machine builds accept only
+   * `"local"` (or nothing, which means the same): anything else fails validation with
+   * a clear error instead of a desk that can never start. Remote ids unlock with the
+   * multi-machine slice, when a second machine exists to verify them against.
+   */
+  machine?: string;
 }
 
 export interface OrgChart {
@@ -304,6 +311,17 @@ function employeeFrom(item: unknown, index: number): ParseResult<OrgEmployee> {
     }
     model = { provider, modelId };
   }
+  // Single-machine builds run every employee here: only absent (or "local", which
+  // reads the same) validates. Anything else is a typo today, and a second machine
+  // away from meaning something — failing fast beats a desk that can never start.
+  const machine = e["machine"];
+  if (machine !== undefined && machine !== null) {
+    if (typeof machine !== "string" || (machine.trim() !== "" && machine.trim() !== "local")) {
+      return fail(
+        `${agentId}: machine must be "local" (this single-machine build runs every employee here)`,
+      );
+    }
+  }
   return {
     ok: true,
     value: {
@@ -315,6 +333,7 @@ function employeeFrom(item: unknown, index: number): ParseResult<OrgEmployee> {
       workspace: workspace.trim(),
       ...(typeof budget === "number" ? { budget } : {}),
       ...(model !== undefined ? { model } : {}),
+      ...(typeof machine === "string" && machine.trim() !== "" ? { machine: machine.trim() } : {}),
     },
   };
 }
@@ -378,6 +397,7 @@ export function serializeOrgChart(chart: OrgChart): string {
       ...(e.model !== undefined
         ? { model: { provider: e.model.provider, model_id: e.model.modelId } }
         : {}),
+      ...(e.machine !== undefined ? { machine: e.machine } : {}),
     })),
   };
   return [
@@ -386,7 +406,8 @@ export function serializeOrgChart(chart: OrgChart): string {
     "# stands in); it and the agent_id both work after @ in a channel.",
     "# joined by reports_to into a tree rooted at the CEO. Budgets are monthly USD caps for an",
     "# employee plus every subordinate; workspace is a sub-directory of the shared workspace",
-    "# (. = all of it) or an absolute path that already exists.",
+    "# (. = all of it) or an absolute path that already exists; machine names the",
+    "# runtime host (only \"local\" on single-machine builds).",
     stringifyYaml(doc, { lineWidth: 0 }).trimEnd(),
     "",
   ].join("\n");

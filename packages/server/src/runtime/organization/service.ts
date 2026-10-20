@@ -934,6 +934,7 @@ export class OrganizationService {
         ...(workspace !== null ? { resolvedWorkspace: workspace } : {}),
         ...(e.budget !== undefined ? { budget: e.budget } : {}),
         ...(e.model !== undefined ? { model: e.model } : {}),
+        ...(e.machine !== undefined ? { machine: e.machine } : {}),
         state: paused.has(e.agentId)
           ? "paused"
           : this.employeeRunning(org, e.agentId)
@@ -1089,6 +1090,8 @@ export class OrganizationService {
         workspace,
         ...(req.budget !== undefined ? { budget: req.budget } : {}),
         ...(req.model !== undefined ? { model: req.model } : {}),
+        // "local" reads the same as omitting it, so only anything else is stored.
+        ...(req.machine !== undefined && req.machine !== "local" ? { machine: req.machine } : {}),
       };
       await this.writeChart(org, [...org.chart.employees, employee]);
       await appendChannelMessage(
@@ -1189,6 +1192,12 @@ export class OrganizationService {
       else if (req.budget !== undefined) next.budget = req.budget;
       if (req.model === null) delete next.model;
       else if (req.model !== undefined) next.model = req.model;
+      // null, "" and "local" all unpin: the chart only ever stores a remote id.
+      if (req.machine === null || req.machine?.trim() === "" || req.machine === "local") {
+        delete next.machine;
+      } else if (req.machine !== undefined) {
+        next.machine = req.machine;
+      }
       if (req.name === null || req.name?.trim() === "") delete next.name;
       else if (req.name !== undefined) {
         const problem = employeeNameProblem(req.name);

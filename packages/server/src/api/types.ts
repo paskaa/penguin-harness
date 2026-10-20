@@ -6083,6 +6083,8 @@ export interface OrgEmployeeItem {
   /** Monthly budget in USD for this employee plus all subordinates; absent = unbounded. */
   budget?: number;
   model?: { provider: string; modelId: string };
+  /** The machine this employee's sessions run on; absent = this server. */
+  machine?: string;
   state: OrgEmployeeState;
   /**
    * The employee's current desk. Absent while the ledger names none, and while the Session
@@ -6588,6 +6590,11 @@ export interface OrgHireRequest {
   budget?: number;
   duties?: string;
   model?: { provider: string; modelId: string };
+  /**
+   * Pin this employee's sessions to a machine. Single-machine builds accept only
+   * `"local"` (stored as absent, like omitting it); anything else fails validation.
+   */
+  machine?: string;
 }
 
 export interface OrgEmployeePatchRequest {
@@ -6601,6 +6608,8 @@ export interface OrgEmployeePatchRequest {
   duties?: string;
   /** null clears the model (back to the Project default). */
   model?: { provider: string; modelId: string } | null;
+  /** Pin to a machine, or null (or "local", or "") to run here. */
+  machine?: string | null;
 }
 
 export interface OrgCalendarUpsertRequest {
