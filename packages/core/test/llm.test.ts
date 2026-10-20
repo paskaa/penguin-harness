@@ -2098,6 +2098,8 @@ describe("GenerativeModel repairs a history left on unanswered tool_calls", () =
     await drain(model);
 
     expect(toolResults(model.requests[0]!)).toHaveLength(0);
+  });
+});
 
 describe("isModelScopedRejection (the provider named the model, not the request)", () => {
   const err = (message: string, extra: Record<string, unknown> = {}): Error =>
