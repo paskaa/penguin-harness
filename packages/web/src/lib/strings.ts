@@ -16,7 +16,7 @@ import type { ModelGroupSort } from "../features/models/model-sort";
 import type { StartPageSiteId } from "../features/builtin-browser/new-tab-page";
 
 export const zh = {
-  appName: "PenguinHarness",
+  appName: "经创贺联",
 
   nav: {
     chat: "对话",
@@ -2201,6 +2201,16 @@ export const zh = {
   },
 
   models: {
+    fallbackChain: "降级链",
+    /** The chain is what a rate-limited Session moves onto; the first entry is tried first. */
+    fallbackChainHint:
+      "模型返回 429（限流或配额用尽）时，会话按此顺序改到下一个模型上跑完。留空则不降级。",
+    fallbackChainEmpty: "未配置：被限流的一轮仍在本模型上重试。",
+    fallbackChainAdd: "添加到降级链",
+    fallbackChainPick: "选择一个模型…",
+    fallbackChainUp: "上移一位",
+    fallbackChainDown: "下移一位",
+    fallbackChainRemove: "从降级链移除",
     title: "模型配置",
     addCustom: "添加自定义模型",
     addToGroup: "添加模型",
@@ -3531,7 +3541,51 @@ export const zh = {
     },
   },
 
+  search: {
+    title: "搜索会话",
+    /** The search field itself; the hint under it names the two ways to focus it. */
+    placeholder: "搜索本项目所有会话：标题与消息内容",
+    focusHint: "按 / 或 ⌘K 聚焦 · Esc 清空",
+    agent: "智能体",
+    allAgents: "全部智能体",
+    workspace: "工作区",
+    workspacePlaceholder: "按工作区路径过滤",
+    /** The time window's label says what it bounds: the server filters on a chat's creation date. */
+    range: "创建于",
+    rangeAll: "全部",
+    rangeToday: "今天",
+    range7d: "近 7 天",
+    range30d: "近一月",
+    includeArchived: "含已归档",
+    sort: "排序",
+    sortRelevance: "命中最多",
+    sortRecent: "最近更新",
+    scopeAll: "本项目全部会话",
+    indexing: (indexed: number, total: number) => `正在建立索引（${indexed}/${total}）`,
+    found: (n: number) => `共 ${n} 个会话`,
+    searching: "正在搜索…",
+    loadMore: "显示更多结果",
+    loadingMore: "正在加载更多…",
+    failed: (reason: string) => `搜索失败：${reason}`,
+    /** Nothing typed yet: the field is an invitation, not an empty result set. */
+    idleTitle: "搜点什么",
+    idleHint: "可以搜标题，也可以搜你记得的那句话里的词。",
+    emptyTitle: (q: string) => `没有找到与「${q}」相关的会话`,
+    emptyHint: "换个说法，或放宽上方的过滤条件。",
+    titleOnly: "标题命中",
+    /** The sidebar's quick box's way to this page, on the same query. */
+    openFullSearch: "在搜索页打开（可筛选、可跳到命中处）",
+    archived: "已归档",
+    matches: (n: number) => `${n} 处命中`,
+    /** One hit's line: which kind of message the excerpt came out of. */
+    roleUser: "我",
+    roleAssistant: "回答",
+    roleThinking: "思考",
+    roleTool: "工具",
+    roleOther: "记录",
+  },
   chat: {
+    searchAllSessions: "搜索全部会话",
     newSessionMenu: "新建对话",
     chooseAgent: "选择 Agent",
     chooseModel: "选择模型",
@@ -4598,6 +4652,17 @@ Benchmark：
     archivedStub: {
       note: "这个对话已归档。取消归档后可以查看内容，它会回到左侧列表。",
     },
+    /** A row's squad mark tooltip: work group + short parent id when known. */
+    squadSession: (squad: string, parent?: string) =>
+      `编队 ${squad}${parent ? ` · 上级 ${parent}` : ""}`,
+    /**
+     * Tooltip of a folder-only group's header — a group with no active conversation of its
+     * own, only rows inside its folders (it renders collapsed and sorts last). `n` is what
+     * those folders hold, which is also the count the dimmed header shows; the Workspace path
+     * follows where the header has one, since this sentence replaces the tooltip that carried it.
+     */
+    folderOnlyGroup: (n: number, path?: string) =>
+      `仅有折叠任务：${n} 个会话${path ? `（${path}）` : ""}`,
     /** The skills note's fixed phrase (the count picks the en plural); the skill names follow it as `nameList`. */
     skillsLabel: (_count: number): string => "使用技能",
     /** Names listed after a note's fixed phrase (the skills). */

@@ -231,6 +231,9 @@ describe("organization routes", () => {
       (await owner.post(`${base}/acme/tickets/2026-09-01-site/move`, { status: "flying" })).status,
     ).toBe(400);
     expect((await owner.post(`${base}/acme/employees`, { title: "HR" })).status).toBe(400); // reportsTo missing
+    expect(
+      (await owner.patch(`${base}/acme/employees/acme_hr`, { machine: 42 })).status,
+    ).toBe(400); // machine mistyped
     // A calendar name the store would not list back is refused here, not written and then lost.
     for (const name of ["bad name", "_daily", "a".repeat(65)]) {
       expect(
@@ -266,6 +269,23 @@ describe("organization routes", () => {
         { orgId: "acme", mission: "Build a marketplace", name: "Acme" },
         "olivia",
       ],
+    });
+  });
+
+
+  it("carries an employee machine pin through hire and patch", async () => {
+    const base = `/api/projects/${ownerProject}/organizations`;
+    await owner.post(`${base}/acme/employees`, {
+      agentId: "acme_hr",
+      title: "HR",
+      reportsTo: "acme_ceo",
+      machine: "local",
+    });
+    expect(calls.at(-1)).toMatchObject({ method: "hire", args: [ownerProject, "acme", { machine: "local" }] });
+    await owner.patch(`${base}/acme/employees/acme_hr`, { machine: null });
+    expect(calls.at(-1)).toMatchObject({
+      method: "patchEmployee",
+      args: [ownerProject, "acme", "acme_hr", { machine: null }],
     });
   });
 
@@ -321,6 +341,64 @@ describe("organization routes", () => {
     expect(calls).toEqual([]);
     // An owner cannot be cleared: a ticket always has one, so `null` is refused as a shape.
     expect((await owner.put(`${base}/tickets/2026-09-01-site`, { owner: null })).status).toBe(400);
+  });
+
+  it("routes the squad family and validates its bodies", async () => {
+    const base = `/api/projects/${ownerProject}/organizations/acme`;
+    expect((await owner.get(`${base}/squads`)).status).toBe(200);
+    expect(calls.at(-1)).toMatchObject({ method: "listSquads", args: [ownerProject, "acme"] });
+    const created = await owner.post(`${base}/squads`, {
+      id: "delivery",
+      name: "Delivery",
+      leader: "agent:dev",
+      members: ["agent:qa"],
+      roles: { "agent:qa": "regression" },
+      instructions: "DB past QA.",
+    });
+    expect(created.status).toBe(201);
+    expect(calls.at(-1)).toMatchObject({
+      method: "createSquad",
+      args: [
+        ownerProject,
+        "acme",
+        {
+          id: "delivery",
+          name: "Delivery",
+          leader: "agent:dev",
+          members: ["agent:qa"],
+          roles: { "agent:qa": "regression" },
+          instructions: "DB past QA.",
+        },
+      ],
+    });
+    expect((await owner.get(`${base}/squads/delivery`)).status).toBe(200);
+    expect(calls.at(-1)).toMatchObject({ method: "squad", args: [ownerProject, "acme", "delivery"] });
+    expect((await owner.put(`${base}/squads/delivery`, { name: "DLV" })).status).toBe(200);
+    expect(calls.at(-1)).toMatchObject({
+      method: "updateSquad",
+      args: [ownerProject, "acme", "delivery", { name: "DLV" }],
+    });
+    expect((await owner.post(`${base}/squads/delivery/archive`, {})).status).toBe(200);
+    expect(calls.at(-1)).toMatchObject({
+      method: "archiveSquad",
+      args: [ownerProject, "acme", "delivery", { userId: "olivia" }],
+    });
+    // A role map that is not a map, or a role that is not a line, never reaches the service.
+    calls.length = 0;
+    expect(
+      (await owner.post(`${base}/squads`, { id: "x", name: "x", leader: "a", roles: ["qa"] })).status,
+    ).toBe(400);
+    expect(
+      (
+        await owner.post(`${base}/squads`, {
+          id: "x",
+          name: "x",
+          leader: "a",
+          roles: { "agent:qa": 42 },
+        })
+      ).status,
+    ).toBe(400);
+    expect(calls).toEqual([]);
   });
 
   it("routes handbook documents by their relative path and keeps the index", async () => {
@@ -535,6 +613,71 @@ describe("organization routes", () => {
     const unblock = await owner.post(`${base}/unblock`);
     expect(unblock.status).toBe(200);
     expect(calls.at(-1)).toMatchObject({ method: "unblockTicket" });
+  });
+
+  it("marks inbox rows read and archived for the caller, and lists the archived rows", async () => {
+    const base = `/api/projects/${ownerProject}/organizations/acme`;
+    const snapshot = { id: "m1", channelId: "default_channel", text: "@user:olivia ship it" };
+
+    const read = await owner.post(`${base}/inbox/read`, { keys: ["mention/m1"], read: true });
+    expect(read.status).toBe(200);
+    // The row state belongs to the signed-in caller, never to a session the body names.
+    expect(calls.at(-1)).toEqual({
+      method: "markInboxRead",
+      args: [ownerProject, "acme", "olivia", { keys: ["mention/m1"], read: true }],
+    });
+
+    const archive = await owner.post(`${base}/inbox/archive`, {
+      keys: ["mention/m1", "blocked/2026-09-01-site"],
+      archived: true,
+      snapshots: { "mention/m1": snapshot },
+    });
+    expect(archive.status).toBe(200);
+    expect(calls.at(-1)).toEqual({
+      method: "markInboxArchived",
+      args: [
+        ownerProject,
+        "acme",
+        "olivia",
+        { keys: ["mention/m1", "blocked/2026-09-01-site"], archived: true, snapshots: { "mention/m1": snapshot } },
+      ],
+    });
+
+    const unarchive = await owner.post(`${base}/inbox/archive`, {
+      keys: ["mention/m1"],
+      archived: false,
+    });
+    expect(unarchive.status).toBe(200);
+    expect(calls.at(-1)?.args).toEqual([
+      ownerProject,
+      "acme",
+      "olivia",
+      { keys: ["mention/m1"], archived: false },
+    ]);
+
+    const archived = await owner.get(`${base}/inbox/archived`);
+    expect(archived.status).toBe(200);
+    expect(calls.at(-1)).toEqual({
+      method: "archivedInbox",
+      args: [ownerProject, "acme", "olivia"],
+    });
+  });
+
+  it("refuses an inbox write with no keys, no flag or a snapshots value that is not a map", async () => {
+    const base = `/api/projects/${ownerProject}/organizations/acme`;
+    const cases: Array<[string, unknown]> = [
+      [`${base}/inbox/read`, { keys: ["mention/m1"] }], // read missing
+      [`${base}/inbox/read`, { keys: "mention/m1", read: true }],
+      [`${base}/inbox/archive`, { keys: ["mention/m1"] }], // archived missing
+      [`${base}/inbox/archive`, { keys: ["mention/m1"], archived: "yes" }],
+      [`${base}/inbox/archive`, { keys: ["mention/m1"], archived: true, snapshots: ["m1"] }],
+    ];
+    for (const [path, body] of cases) {
+      const res = await owner.post(path, body);
+      expect(res.status, `${path} ${JSON.stringify(body)}`).toBe(400);
+    }
+    // A refusal never reaches the service.
+    expect(calls).toEqual([]);
   });
 
   it("drops a signed-in member's session id: the write cannot be attributed to that employee", async () => {

@@ -35,6 +35,7 @@ import type {
   SessionCategory,
   SessionCategoryCounts,
   SessionInfo,
+  SessionRunItem,
   SessionSandbox,
   SessionSandboxPreset,
   SessionSource,
@@ -220,6 +221,20 @@ export interface SessionServiceDeps {
   sessions: SessionIndex;
   manager: SessionManager;
   projectConfig: ProjectConfigStore;
+  /** Run-outcome reads; absent in narrow tests (reads answer empty). */
+  runOutcomes?: {
+    recentBySession(
+      projectId: string,
+      agentId: string,
+      sessionId: string,
+      limit: number,
+    ): Array<{
+      startedAt: string;
+      endedAt: string;
+      outcome: "completed" | "failed" | "aborted";
+      errorCode: string | null;
+    }>;
+  };
   /** In-process origin registry derived from session_meta (the DB stores no source column). */
   sources: SessionOrigins;
   /** Trace-file index: discovery / adoption / stats serve from it (mtime-gated reconciler; no per-request walks). */
@@ -436,6 +451,9 @@ export class SessionService {
       pendingFollowUpCount: this.deps.manager.pendingFollowUpCount(row.sessionId),
       hasTrace,
       archived: listCategory(source, listingMarksOf(row)) === "archived",
+      // When the user filed it away by hand — the archive page shows this, so a conversation
+      // that was archived can be found by the moment it was archived.
+      archivedAt: row.archivedAt ?? null,
       ...(messagingChannel !== null ? { messagingChannel } : {}),
       ...(orgId !== undefined ? { orgId } : {}),
       ...(row.client !== null && row.client !== undefined ? { client: row.client } : {}),
@@ -479,6 +497,19 @@ export class SessionService {
   /** Whether this Session already has a Trace record (a Task has been run): answered by the index (reconciled first). */
   async hasTrace(row: SessionRow): Promise<boolean> {
     return (await this.discoverTraces(row.projectId, row.agentId)).has(row.sessionId);
+  }
+
+  /** A session's recent runs, newest first (empty without the outcome memory). */
+  async sessionRuns(row: SessionRow, limit: number): Promise<SessionRunItem[]> {
+    const rows =
+      this.deps.runOutcomes?.recentBySession(row.projectId, row.agentId, row.sessionId, limit) ??
+      [];
+    return rows.map((r) => ({
+      startedAt: r.startedAt,
+      endedAt: r.endedAt,
+      outcome: r.outcome,
+      ...(r.errorCode !== null ? { errorCode: r.errorCode } : {}),
+    }));
   }
 
   /**
@@ -791,7 +822,18 @@ export class SessionService {
     // Trace activity from the index (one mtime-gated reconcile, then a pure DB read —
     // this used to walk the Agent's ENTIRE trace history on every agents-list request):
     // the date is the shard's date directory (local yyyy-mm-dd, core's writing convention).
-    await this.deps.traceIndex.reconcileAgent(projectId, agentId);
+    //
+    // Bounded wait: when the mtime gate opens (an active session writing), the reconcile
+    // re-diffs thousands of shards — seconds of work that races a session registration's
+    // row locks. The list must not stall behind it: after 300ms serve the current index;
+    // the reconcile keeps running in the background (TraceIndexService dedups concurrent
+    // runs) and the next poll serves its result.
+    await Promise.race([
+      this.deps.traceIndex.reconcileAgent(projectId, agentId),
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, 300);
+      }),
+    ]);
     for (const f of this.deps.traceStore.listFilesByAgent(projectId, agentId)) {
       mark(f.date, f.sessionId);
     }
@@ -976,17 +1018,82 @@ export class SessionService {
    * hands it to the new session's `[model_switch_from]` block so the model can read the
    * source history itself when it needs it.
    */
+  /** TTL cache for latestTracePath: repeat detail reads of one Session skip the
+   * (mtime-gated) reconcile + index lookup entirely for 3s. Negative results cached
+   * too (a session with no trace yet). */
+  private latestTraceTtl = new Map<string, { at: number; path: string | undefined }>();
+
+  /**
+   * Deterministic direct lookup: Trace shards are named `<date>/<sessionId>_<index3>.jsonl`
+   * under the Agent's traces dir, so a name-filtered readdir over the date dirs (no stat,
+   * no head reads) answers "is the disk ahead of the index" in tens of milliseconds —
+   * vs the forced reconcile's walk over the whole multi-thousand-shard tree. Returns the
+   * absolute path of the highest (date, index) shard, or undefined.
+   */
+  private async quickLatestTracePath(row: SessionRow): Promise<string | undefined> {
+    const dir = tracesDir(this.deps.root, row.projectId, row.agentId);
+    const prefix = `${row.sessionId}_`;
+    try {
+      const dateDirs = (await fs.readdir(dir, { withFileTypes: true }))
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name)
+        .sort();
+      let best: string | undefined;
+      for (const d of dateDirs) {
+        let bestIdx = -1;
+        for (const n of await fs.readdir(path.join(dir, d))) {
+          if (n.startsWith(prefix) && n.endsWith(".jsonl")) {
+            const idx = Number(n.slice(prefix.length, -".jsonl".length));
+            if (Number.isInteger(idx) && idx > bestIdx) bestIdx = idx;
+          }
+        }
+        if (bestIdx >= 0) {
+          best = path.join(dir, d, `${prefix}${String(bestIdx).padStart(3, "0")}.jsonl`);
+        }
+      }
+      return best;
+    } catch {
+      return undefined;
+    }
+  }
+
   async latestTracePath(row: SessionRow): Promise<string | undefined> {
-    await this.deps.traceIndex.reconcileAgent(row.projectId, row.agentId);
+    const cacheKey = `${row.projectId}/${row.agentId}/${row.sessionId}`;
+    const cached = this.latestTraceTtl.get(cacheKey);
+    if (cached && Date.now() - cached.at < 3000) return cached.path;
+    // Bounded wait — same rule as walkRows: an open mtime gate (an active session
+    // writing) turns this reconcile into a seconds-long full re-diff, and the session
+    // DETAIL paid it on every first open. If it does not settle in 300ms the quick
+    // scan below answers from the filesystem names alone; the reconcile finishes in
+    // the background for the next call.
+    await Promise.race([
+      this.deps.traceIndex.reconcileAgent(row.projectId, row.agentId),
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, 300);
+      }),
+    ]);
     let files = this.deps.traceStore.listFilesBySession(row.projectId, row.agentId, row.sessionId);
     if (files.length === 0) {
-      // Index miss with disk possibly ahead: one forced diff, then retry (the consumers'
-      // rule — a stale index costs one extra scan, never a missing resume shard).
+      // Index miss with disk possibly ahead: try the deterministic direct lookup FIRST —
+      // the forced reconcile walks the whole Agent trace tree (seconds on a multi-thousand-
+      // shard Agent) and a brand-new Session pays it on every open until its rows land.
+      // The quick scan answers in milliseconds; only when it finds nothing does the forced
+      // diff run (the consumers' rule — a stale index costs one extra scan, never a
+      // missing resume shard — still holds for anything a name scan cannot see).
+      const quick = await this.quickLatestTracePath(row);
+      if (quick !== undefined) {
+        if (this.latestTraceTtl.size > 2000) this.latestTraceTtl.clear();
+        this.latestTraceTtl.set(cacheKey, { at: Date.now(), path: quick });
+        return quick;
+      }
       await this.deps.traceIndex.reconcileAgent(row.projectId, row.agentId, { force: true });
       files = this.deps.traceStore.listFilesBySession(row.projectId, row.agentId, row.sessionId);
     }
     const latest = files.at(-1);
-    return latest === undefined ? undefined : traceFilePath(this.deps.root, latest);
+    const result = latest === undefined ? undefined : traceFilePath(this.deps.root, latest);
+    if (this.latestTraceTtl.size > 2000) this.latestTraceTtl.clear();
+    this.latestTraceTtl.set(cacheKey, { at: Date.now(), path: result });
+    return result;
   }
 
   /**

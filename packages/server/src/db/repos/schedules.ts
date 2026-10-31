@@ -23,6 +23,12 @@ export interface ScheduleStateRow {
   firedOnce: boolean;
   missed: boolean;
   invalidReason: string | null;
+  /** Consecutive firing failures (session creation / send); a success resets it. */
+  failCount: number;
+  /** Auto-pause instant after repeated failures; null = firing normally. */
+  autoPausedAt: string | null;
+  /** Why the auto-pause tripped (the firing-failure code). */
+  autoPauseReason: string | null;
 }
 
 function mapRow(r: Record<string, unknown>): ScheduleStateRow {
@@ -38,6 +44,9 @@ function mapRow(r: Record<string, unknown>): ScheduleStateRow {
     firedOnce: Number(r.fired_once) === 1,
     missed: Number(r.missed) === 1,
     invalidReason: (r.invalid_reason as string | null) ?? null,
+    failCount: Number(r.fail_count ?? 0),
+    autoPausedAt: (r.auto_paused_at as string | null) ?? null,
+    autoPauseReason: (r.auto_pause_reason as string | null) ?? null,
   };
 }
 
@@ -103,18 +112,22 @@ export class SchedulesRepo implements Schedules {
         .prepare(
           `UPDATE schedule_state
              SET start_at_ms = ?, def_hash = ?, last_slot_ms = NULL, last_fired_at = NULL,
-                 fired_once = 0, missed = 0, invalid_reason = NULL
+                 fired_once = 0, missed = 0, invalid_reason = NULL,
+                 fail_count = 0, auto_paused_at = NULL, auto_pause_reason = NULL
            WHERE project_id = ? AND agent_id = ? AND name = ?`,
         )
         .run(args.startAtMs, args.defHash, args.projectId, args.agentId, args.name);
+      this.clearFirings(args.projectId, args.agentId, args.name);
       fresh = true;
     } else if (existing.defHash !== args.defHash) {
       this.db
         .prepare(
-          `UPDATE schedule_state SET def_hash = ?, invalid_reason = NULL
+          `UPDATE schedule_state SET def_hash = ?, invalid_reason = NULL,
+             fail_count = 0, auto_paused_at = NULL, auto_pause_reason = NULL
            WHERE project_id = ? AND agent_id = ? AND name = ?`,
         )
         .run(args.defHash, args.projectId, args.agentId, args.name);
+      this.clearFirings(args.projectId, args.agentId, args.name);
     }
     const row = this.find(args.projectId, args.agentId, args.name);
     if (!row) throw new Error("Failed to read back schedule_state after registration");
@@ -167,11 +180,115 @@ export class SchedulesRepo implements Schedules {
       .run(reason, projectId, agentId, name);
   }
 
+  /** One more consecutive firing failure; answers the new count. */
+  noteFiringFailure(projectId: string, agentId: string, name: string): number {
+    this.db
+      .prepare(
+        `UPDATE schedule_state SET fail_count = fail_count + 1
+         WHERE project_id = ? AND agent_id = ? AND name = ?`,
+      )
+      .run(projectId, agentId, name);
+    const row = this.db
+      .prepare(
+        "SELECT fail_count FROM schedule_state WHERE project_id = ? AND agent_id = ? AND name = ?",
+      )
+      .get(projectId, agentId, name) as { fail_count: number } | undefined;
+    return row?.fail_count ?? 0;
+  }
+
+  /** A success resets the consecutive count (the pause itself needs an explicit resume). */
+  noteFiringSuccess(projectId: string, agentId: string, name: string): void {
+    this.db
+      .prepare(
+        `UPDATE schedule_state SET fail_count = 0
+         WHERE project_id = ? AND agent_id = ? AND name = ?`,
+      )
+      .run(projectId, agentId, name);
+  }
+
+  /** Stops the ticks after repeated failures; resume (or a file edit) clears it. */
+  autoPause(projectId: string, agentId: string, name: string, reason: string, at: string): void {
+    this.db
+      .prepare(
+        `UPDATE schedule_state SET auto_paused_at = ?, auto_pause_reason = ?
+         WHERE project_id = ? AND agent_id = ? AND name = ?`,
+      )
+      .run(at, reason, projectId, agentId, name);
+  }
+
+  /** Lifts an auto-pause and forgets the count behind it. */
+  clearAutoPause(projectId: string, agentId: string, name: string): void {
+    this.db
+      .prepare(
+        `UPDATE schedule_state SET fail_count = 0, auto_paused_at = NULL, auto_pause_reason = NULL
+         WHERE project_id = ? AND agent_id = ? AND name = ?`,
+      )
+      .run(projectId, agentId, name);
+    this.clearFirings(projectId, agentId, name);
+  }
+
+  /** Links one firing to the session it went to (scheduled and manual alike). */
+  recordFiring(
+    projectId: string,
+    agentId: string,
+    name: string,
+    sessionId: string,
+    firedAt: string,
+    manual: boolean,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO schedule_firings (project_id, agent_id, name, session_id, fired_at, manual)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(projectId, agentId, name, sessionId, firedAt, manual ? 1 : 0);
+  }
+
+  /** Forgets a task's firing links (resume and file edits start the run-rule over). */
+  clearFirings(projectId: string, agentId: string, name: string): void {
+    this.db
+      .prepare("DELETE FROM schedule_firings WHERE project_id = ? AND agent_id = ? AND name = ?")
+      .run(projectId, agentId, name);
+  }
+
+  /**
+   * One outcome per scheduled firing since `sinceIso`, oldest first: each firing's
+   * outcome is its session's earliest run started at/after the fire (the fired task
+   * starts synchronously, so the first run after the stamp is it). Firings with no
+   * run yet read as nothing; manual firings never count (human-supervised).
+   */
+  firingOutcomes(
+    projectId: string,
+    agentId: string,
+    name: string,
+    sinceIso: string,
+  ): Array<"completed" | "failed" | "aborted"> {
+    const rows = this.db
+      .prepare(
+        `SELECT (SELECT o.outcome FROM run_outcomes o
+                 WHERE o.project_id = f.project_id AND o.agent_id = f.agent_id
+                   AND o.session_id = f.session_id AND o.started_at >= f.fired_at
+                 ORDER BY o.started_at ASC, o.id ASC LIMIT 1) AS outcome
+         FROM schedule_firings f
+         WHERE f.project_id = ? AND f.agent_id = ? AND f.name = ?
+           AND f.manual = 0 AND f.fired_at >= ?
+         ORDER BY f.fired_at ASC`,
+      )
+      .all(projectId, agentId, name, sinceIso) as Array<{ outcome: string | null }>;
+    return rows
+      .map((r) => r.outcome)
+      .filter(
+        (o): o is "completed" | "failed" | "aborted" =>
+          o === "completed" || o === "failed" || o === "aborted",
+      );
+  }
+
   /** Deleting the file removes the task: clears its runtime state. */
   delete(projectId: string, agentId: string, name: string): void {
     this.db
       .prepare("DELETE FROM schedule_state WHERE project_id = ? AND agent_id = ? AND name = ?")
       .run(projectId, agentId, name);
+    this.clearFirings(projectId, agentId, name);
   }
 
   /** Reconciliation cleanup: deletes state rows under this Agent that aren't in the current file list, returning the removed names. */
@@ -192,9 +309,13 @@ export class SchedulesRepo implements Schedules {
     this.db
       .prepare("DELETE FROM schedule_state WHERE project_id = ? AND agent_id = ?")
       .run(projectId, agentId);
+    this.db
+      .prepare("DELETE FROM schedule_firings WHERE project_id = ? AND agent_id = ?")
+      .run(projectId, agentId);
   }
 
   deleteByProject(projectId: string): void {
     this.db.prepare("DELETE FROM schedule_state WHERE project_id = ?").run(projectId);
+    this.db.prepare("DELETE FROM schedule_firings WHERE project_id = ?").run(projectId);
   }
 }

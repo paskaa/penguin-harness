@@ -1,7 +1,7 @@
 ---
 name: company-mirror
 description: Run a PenguinHarness organization that mirrors a real company — one digital twin per real colleague, each twin's desk bound to that colleague's chat bot, twins answering what the handbook already knows and relaying the rest to one another instead of hiring, scheduling and filing tickets.
-version: 2026.10.10.1
+version: 2026.10.20.1
 ---
 
 # Company Mirror
@@ -28,10 +28,10 @@ A mission that names streams of work, deliverables or a market is not a mirror m
 
 The CEO twin is the one employee creation makes, and its initialization run collects the chart instead of proposing a plan.
 
-**1. Ask for the real org chart, then end the run.** Read `<app_data_dir>/organizations/<org_id>/handbook/README.md` first. Then ask the board — the organization's creator, `created_by` in `org_config.toml`, written `@user:<id>` — in the all-hands channel, and stop. Ask for all four facts per person in one message: **name, title, who they report to, and which chat account or bot will be theirs.**
+**1. Ask for the real org chart, then end the run.** Read `<app_data_dir>/organizations/<org_id>/handbook/README.md` first. Then ask the board — the organization's creator, `created_by` in `org_config.toml`, mentioned as `[@creator](mention://user/<id>)` — in the all-hands channel, and stop. Ask for all four facts per person in one message: **name, title, who they report to, and which chat account or bot will be theirs.**
 
 ```bash
-penguin org channel send -m "@user:alice To build a twin per colleague I need the real org chart: for every person, their name, their title, who they report to, and which Feishu account or bot will be theirs. Reply here and I will propose the roster." --channel default_channel
+penguin org channel send -m "[@alice](mention://user/alice) To build a twin per colleague I need the real org chart: for every person, their name, their title, who they report to, and which Feishu account or bot will be theirs. Reply here and I will propose the roster." --channel default_channel
 ```
 
 Nothing is hired before the answer. The board's reply arrives as a mention or as a plain message in your desk conversation.
@@ -77,21 +77,21 @@ This is what every twin, the CEO twin included, runs on. There is no sweep: each
 - **Relay** otherwise. Send one message naming the target twin, then tell your human that you did, and end the run:
 
 ```bash
-penguin org channel send -m "@co_acme_li_na Zhang Wei asks: when does the payments freeze start?" --channel default_channel
+penguin org channel send -m "[@co_acme_li_na](mention://agent/co_acme_li_na) Zhang Wei asks: when does the payments freeze start?" --channel default_channel
 ```
 
 The all-hands channel is where twins reach each other — every employee is in it by definition, and a mirror organization opens no others unless the board asked for one. Then reply to your human — "Passed to Li Na's twin; I will tell you when the answer comes back", in the organization's working language — and end the run. **Never invent an answer on behalf of another person.**
 
 **A `kind: mention` run from another twin** is a question you were relayed. Two moves:
 
-- **Answer from what you know** when the handbook, the person pages or your brief cover it: `penguin org channel send -m "@co_acme_zhang_wei The freeze starts on the 25th." --channel <the trigger's channel>`.
+- **Answer from what you know** when the handbook, the person pages or your brief cover it: `penguin org channel send -m "[@co_acme_zhang_wei](mention://agent/co_acme_zhang_wei) The freeze starts on the 25th." --channel <the trigger's channel>`.
 - **Otherwise ask your human**, and make that question the **final reply of the run** — the bound bot delivers what you say to the chat, so a question buried in the middle of a run is a question your human may never see. Phrase it for a person, naming the asker ("Zhang Wei asks: …"), end the run and wait. Do not answer the origin twin with a promise; the chain resumes when your human replies.
 
-**Your human's answer** comes back as another plain message with no trigger block. Relay it into the same channel with `@<origin twin>`, verbatim or tightened but never re-interpreted. The origin twin is woken by that mention, and its final reply of that run is the answer for its own human.
+**Your human's answer** comes back as another plain message with no trigger block. Relay it into the same channel with the origin twin's mention link `[@twin](mention://agent/<twin>)`, verbatim or tightened but never re-interpreted. The origin twin is woken by that mention, and its final reply of that run is the answer for its own human.
 
 **Write down what you learned.** Every answer that came back through a relay goes into the handbook — `people/<name>.md` for something about a person, `faq.md` for something the whole company will be asked again — so the next time that question arrives it is answered alone. A mirror company that relays as much in its third month as in its first is a company that is not writing anything down.
 
-**Relays spend the mention chain; a person's message starts a new one.** A desk carries the hop of the last mention that woke it, `penguin org channel send` from that desk is one hop deeper, and at the organization's `mention_chain_limit` (default 3) an `@` is recorded but no longer delivered. A message from a person — through the bound bot or the chat page — resets the desk's hop to 0, so every question a human asks opens a fresh chain and one question relayed out plus one answer relayed back always fits inside the default. What does not fit is twins settling a detail among themselves: never `@`-ping-pong — send one message carrying everything the other side needs, and let a person's next message start the next chain.
+**Relays spend the mention chain; a person's message starts a new one.** A desk carries the hop of the last mention that woke it, `penguin org channel send` from that desk is one hop deeper, and at the organization's `mention_chain_limit` (default 3) an `@` is recorded but no longer delivered. A message from a person — through the bound bot or the chat page — resets the desk's hop to 0, so every question a human asks opens a fresh chain and one question relayed out plus one answer relayed back always fits inside the default. What does not fit is twins settling a detail among themselves: never mention-ping-pong — send one message carrying everything the other side needs, and let a person's next message start the next chain.
 
 **What stays out.** No tickets and no calendar events, unless the board asks the company for a real piece of work. Then that piece of work — and only it — follows the standard `company-employee` protocol: a ticket, an owner, a ticket session, a result written back. The relay goes on unchanged around it.
 

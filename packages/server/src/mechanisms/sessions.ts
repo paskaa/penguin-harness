@@ -113,6 +113,39 @@ export abstract class Schedules {
   ): void;
   abstract markMissed(projectId: string, agentId: string, name: string): void;
   abstract markInvalid(projectId: string, agentId: string, name: string, reason: string): void;
+  /** One more consecutive firing failure; answers the new count. */
+  abstract noteFiringFailure(projectId: string, agentId: string, name: string): number;
+  /** A success resets the consecutive count (the pause itself needs an explicit resume). */
+  abstract noteFiringSuccess(projectId: string, agentId: string, name: string): void;
+  /** Stops the ticks after repeated failures; resume (or a file edit) clears it. */
+  abstract autoPause(
+    projectId: string,
+    agentId: string,
+    name: string,
+    reason: string,
+    at: string,
+  ): void;
+  /** Lifts an auto-pause and forgets the count behind it. */
+  abstract clearAutoPause(projectId: string, agentId: string, name: string): void;
+  /** Links one firing to the session it went to (scheduled and manual alike). */
+  abstract recordFiring(
+    projectId: string,
+    agentId: string,
+    name: string,
+    sessionId: string,
+    firedAt: string,
+    manual: boolean,
+  ): void;
+  /**
+   * One outcome per scheduled firing since `sinceIso`, oldest first (manual firings
+   * never count; firings with no run yet read as nothing).
+   */
+  abstract firingOutcomes(
+    projectId: string,
+    agentId: string,
+    name: string,
+    sinceIso: string,
+  ): Array<"completed" | "failed" | "aborted">;
   abstract delete(projectId: string, agentId: string, name: string): void;
   abstract deleteMissing(projectId: string, agentId: string, presentNames: string[]): string[];
   abstract deleteByAgent(projectId: string, agentId: string): void;
@@ -136,4 +169,24 @@ export abstract class Scheduling {
     invalid: Array<{ agentId: string; name: string; error: string }>;
   }>;
   abstract dropEntry(projectId: string, agentId: string, name: string): void;
+  /**
+   * Fire one task right now, outside its schedule: the same dispatch as a due slot
+   * (bound Session or a fresh one, queued when busy), but an extra run that never
+   * consumes the schedule itself. Throws when the task cannot run (unknown name,
+   * invalid file, lost Session, Session-creation failure).
+   */
+  abstract fireNow(
+    projectId: string,
+    agentId: string,
+    name: string,
+  ): Promise<{ sessionId: string; queued: boolean }>;
+  /**
+   * Lifts an auto-pause (and forgets the count behind it). Answers whether anything was
+   * paused; unknown names throw schedule_not_found like fireNow.
+   */
+  abstract resumeAutoPaused(
+    projectId: string,
+    agentId: string,
+    name: string,
+  ): Promise<{ resumed: boolean }>;
 }

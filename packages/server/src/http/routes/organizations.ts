@@ -34,6 +34,7 @@ import type { Context } from "hono";
 import { isValidId } from "@prismshadow/penguin-core";
 import type {
   OrgApprovalMode,
+  OrgChannelMessage,
   OrgLanguage,
   OrgStatus,
   OrgTicketPriority,
@@ -71,6 +72,23 @@ const PRIORITIES: readonly OrgTicketPriority[] = ["P0", "P1", "P2"];
 function requireTicketId(raw: string | undefined): string {
   if (!raw || !TICKET_ID_PATTERN.test(raw)) throw badRequest("Invalid ticket id.");
   return raw;
+}
+
+/** A squad role map: member principal → one line, at most 200 entries of 500 characters. */
+function requireRolesMap(raw: unknown): Record<string, string> {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw badRequest("roles must map member principals to strings.");
+  }
+  const entries = Object.entries(raw as Record<string, unknown>);
+  if (entries.length > 200) throw badRequest("roles holds at most 200 entries.");
+  const out: Record<string, string> = {};
+  for (const [key, value] of entries) {
+    if (typeof value !== "string" || value.length > 500) {
+      throw badRequest(`roles[${key}] must be a string of at most 500 characters.`);
+    }
+    out[key] = value;
+  }
+  return out;
 }
 
 function requireName(raw: string | undefined, label: string): string {
@@ -173,6 +191,14 @@ export interface OrgRouteDeps {
   serverSettingsRepo: Pick<Settings, "getCompanyMode">;
 }
 
+// Organizations-list response cache (SWR): the view builds per-org session maps over
+// every Agent (seconds of synchronous work), while the page is opened rarely. 15s
+// staleness + background refresh; the content does not vary by viewer (the member()
+// gate is binary), so the key is the Project alone.
+const ORG_LIST_TTL = 15000;
+const orgListCache = new Map<string, { at: number; body: OrganizationsResponse }>();
+const orgListInFlight = new Map<string, Promise<OrganizationsResponse>>();
+
 export function organizationRoutes(deps: OrgRouteDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
 
@@ -192,7 +218,31 @@ export function organizationRoutes(deps: OrgRouteDeps): Hono<AppEnv> {
   app.get("/", async (c) => {
     const projectId = requireValidId(c, "projectId");
     member(c, projectId);
-    const res: OrganizationsResponse = { organizations: await deps.orgService.list(projectId) };
+    const hit = orgListCache.get(projectId);
+    const refresh = (): Promise<OrganizationsResponse> => {
+      let p = orgListInFlight.get(projectId);
+      if (!p) {
+        p = deps.orgService
+          .list(projectId)
+          .then((organizations) => {
+            const body: OrganizationsResponse = { organizations };
+            if (orgListCache.size > 100) orgListCache.clear();
+            orgListCache.set(projectId, { at: Date.now(), body });
+            return body;
+          })
+          .finally(() => {
+            orgListInFlight.delete(projectId);
+          });
+        orgListInFlight.set(projectId, p);
+      }
+      return p;
+    };
+    if (hit) {
+      if (Date.now() - hit.at < ORG_LIST_TTL) return c.json(hit.body);
+      void refresh();
+      return c.json(hit.body);
+    }
+    const res = await refresh();
     return c.json(res);
   });
 
@@ -328,6 +378,7 @@ export function organizationRoutes(deps: OrgRouteDeps): Hono<AppEnv> {
     const budget = optionalNumber(body, "budget", { nonNegative: true });
     const duties = optionalString(body, "duties", { maxLen: 2000 });
     const model = parseModel(body);
+    const machine = optionalString(body, "machine", { minLen: 1, maxLen: 64 });
     const item = await deps.orgService.hire(projectId, orgId, {
       ...(agentId !== undefined ? { agentId } : {}),
       ...(newAgent !== undefined ? { newAgent } : {}),
@@ -338,6 +389,7 @@ export function organizationRoutes(deps: OrgRouteDeps): Hono<AppEnv> {
       ...(budget !== undefined ? { budget } : {}),
       ...(duties !== undefined ? { duties } : {}),
       ...(model !== undefined && model !== null ? { model } : {}),
+      ...(machine !== undefined ? { machine } : {}),
     });
     return c.json(item, 201);
   });
@@ -357,6 +409,9 @@ export function organizationRoutes(deps: OrgRouteDeps): Hono<AppEnv> {
       body.budget === null ? null : optionalNumber(body, "budget", { nonNegative: true });
     const duties = optionalString(body, "duties", { maxLen: 2000 });
     const model = parseModel(body);
+    // null (or "local", or "") pins nowhere: the employee runs on this server.
+    const machine =
+      body.machine === null ? null : optionalString(body, "machine", { maxLen: 64 });
     const item = await deps.orgService.patchEmployee(projectId, orgId, agentId, {
       ...(name !== undefined ? { name } : {}),
       ...(title !== undefined ? { title } : {}),
@@ -365,6 +420,7 @@ export function organizationRoutes(deps: OrgRouteDeps): Hono<AppEnv> {
       ...(budget !== undefined ? { budget } : {}),
       ...(duties !== undefined ? { duties } : {}),
       ...(model !== undefined ? { model } : {}),
+      ...(machine !== undefined ? { machine } : {}),
     });
     return c.json(item);
   });
@@ -750,6 +806,125 @@ export function organizationRoutes(deps: OrgRouteDeps): Hono<AppEnv> {
     return c.json(
       await deps.orgService.attachTicket(projectId, orgId, ticketId, sessionId, actorOf(c, body)),
     );
+  });
+
+  // ---- squads ----
+
+  app.get("/:orgId/squads", async (c) => {
+    const projectId = requireValidId(c, "projectId");
+    const orgId = requireValidId(c, "orgId");
+    member(c, projectId);
+    return c.json(await deps.orgService.listSquads(projectId, orgId));
+  });
+
+  app.post("/:orgId/squads", async (c) => {
+    const projectId = requireValidId(c, "projectId");
+    const orgId = requireValidId(c, "orgId");
+    member(c, projectId);
+    const body = await readJson(c);
+    const members = optionalStringArray(body, "members");
+    const instructions = optionalString(body, "instructions", { maxLen: 20_000 });
+    const detail = await deps.orgService.createSquad(projectId, orgId, {
+      id: requireString(body, "id", { minLen: 2, maxLen: 64 }),
+      name: requireString(body, "name", { minLen: 1, maxLen: 100 }),
+      leader: requireString(body, "leader", { minLen: 1, maxLen: 100 }),
+      ...(members !== undefined ? { members } : {}),
+      ...(body.roles !== undefined ? { roles: requireRolesMap(body.roles) } : {}),
+      ...(instructions !== undefined ? { instructions } : {}),
+    });
+    return c.json(detail, 201);
+  });
+
+  app.get("/:orgId/squads/:squadId", async (c) => {
+    const projectId = requireValidId(c, "projectId");
+    const orgId = requireValidId(c, "orgId");
+    const squadId = requireValidId(c, "squadId");
+    member(c, projectId);
+    return c.json(await deps.orgService.squad(projectId, orgId, squadId));
+  });
+
+  app.put("/:orgId/squads/:squadId", async (c) => {
+    const projectId = requireValidId(c, "projectId");
+    const orgId = requireValidId(c, "orgId");
+    const squadId = requireValidId(c, "squadId");
+    member(c, projectId);
+    const body = await readJson(c);
+    const name = optionalString(body, "name", { minLen: 1, maxLen: 100 });
+    const leader = optionalString(body, "leader", { minLen: 1, maxLen: 100 });
+    const members = optionalStringArray(body, "members");
+    const instructions = optionalString(body, "instructions", { maxLen: 20_000 });
+    return c.json(
+      await deps.orgService.updateSquad(projectId, orgId, squadId, {
+        ...(name !== undefined ? { name } : {}),
+        ...(leader !== undefined ? { leader } : {}),
+        ...(members !== undefined ? { members } : {}),
+        ...(body.roles !== undefined ? { roles: requireRolesMap(body.roles) } : {}),
+        ...(instructions !== undefined ? { instructions } : {}),
+      }),
+    );
+  });
+
+  app.post("/:orgId/squads/:squadId/archive", async (c) => {
+    const projectId = requireValidId(c, "projectId");
+    const orgId = requireValidId(c, "orgId");
+    const squadId = requireValidId(c, "squadId");
+    member(c, projectId);
+    const body = await readJson(c);
+    return c.json(
+      await deps.orgService.archiveSquad(projectId, orgId, squadId, actorOf(c, body)),
+    );
+  });
+
+  // ---- inbox state ----
+
+  app.post("/:orgId/inbox/read", async (c) => {
+    const projectId = requireValidId(c, "projectId");
+    const orgId = requireValidId(c, "orgId");
+    member(c, projectId);
+    const body = await readJson(c);
+    const keys = optionalStringArray(body, "keys");
+    const read = optionalBoolean(body, "read");
+    if (keys === undefined || read === undefined) {
+      throw badRequest("keys and read are required.");
+    }
+    return c.json(
+      await deps.orgService.markInboxRead(projectId, orgId, c.var.user.userId, { keys, read }),
+    );
+  });
+
+  app.post("/:orgId/inbox/archive", async (c) => {
+    const projectId = requireValidId(c, "projectId");
+    const orgId = requireValidId(c, "orgId");
+    member(c, projectId);
+    const body = await readJson(c);
+    const keys = optionalStringArray(body, "keys");
+    const archived = optionalBoolean(body, "archived");
+    if (keys === undefined || archived === undefined) {
+      throw badRequest("keys and archived are required.");
+    }
+    const snapshots = body.snapshots;
+    if (
+      snapshots !== undefined &&
+      (snapshots === null || typeof snapshots !== "object" || Array.isArray(snapshots))
+    ) {
+      throw badRequest("snapshots must map row keys to messages.");
+    }
+    return c.json(
+      await deps.orgService.markInboxArchived(projectId, orgId, c.var.user.userId, {
+        keys,
+        archived,
+        ...(snapshots !== undefined
+          ? { snapshots: snapshots as Record<string, OrgChannelMessage> }
+          : {}),
+      }),
+    );
+  });
+
+  app.get("/:orgId/inbox/archived", async (c) => {
+    const projectId = requireValidId(c, "projectId");
+    const orgId = requireValidId(c, "orgId");
+    member(c, projectId);
+    return c.json(await deps.orgService.archivedInbox(projectId, orgId, c.var.user.userId));
   });
 
   // ---- channels ----

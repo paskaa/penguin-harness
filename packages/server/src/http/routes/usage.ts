@@ -91,6 +91,33 @@ function tsWindowQuery(c: Context<AppEnv>): { fromTs?: string; toTs?: string } {
 export function usageRoutes(deps: UsageRouteDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
 
+/**
+ * Short-TTL response cache for the main usage read: the dashboard re-requests the
+ * same aggregates several times a minute while every miss costs 4-6 grouped scans
+ * over a six-figure usage_records table (seconds through the synchronous DB bridge).
+ * 5s staleness is invisible on an analytics chart. Keyed by the FULL request shape
+ * (projectId + args + includeGlobalErrors, so admin-only rows never leak across
+ * viewers); bounded size.
+ */
+const usageCache = new Map<string, { at: number; body: unknown }>();
+// Aligned with the 30s key-quantization bucket: at most ONE aggregate re-run per
+// bucket per shape (the bucket boundary is when a miss can happen). Usage charts
+// lag at most 30s — the same staleness the quantized key already accepts.
+const USAGE_TTL_MS = 30000;
+// Rolling fromTs/toTs the dashboard computes client-side change every request; quantize
+// them to 30s buckets in the KEY only (the served body's exact window differs by <30s —
+// invisible on the charts) so consecutive polls share entries.
+const USAGE_KEY_TTL = 5000;
+const usageInFlight = new Map<string, Promise<unknown>>();
+
+function usageQuantizeKey(key: string): string {
+  return key.replace(/"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[^"]*"/g, (m0) => {
+    const ms = Date.parse(JSON.parse(m0));
+    if (Number.isNaN(ms)) return m0;
+    return JSON.stringify(new Date(Math.floor(ms / 30000) * 30000).toISOString());
+  });
+}
+
   app.get("/", async (c) => {
     // Defensive id validation.
     const projectId = requireValidId(c, "projectId");
@@ -126,8 +153,7 @@ export function usageRoutes(deps: UsageRouteDeps): Hono<AppEnv> {
       }
       groupLimit = n;
     }
-    return c.json(
-      await deps.usageService.query(projectId, {
+    const usageArgs = {
         groupBy: groupByRaw as UsageGroupBy,
         granularity,
         ...window,
@@ -143,8 +169,22 @@ export function usageRoutes(deps: UsageRouteDeps): Hono<AppEnv> {
         ...(provider !== undefined && provider !== "" ? { provider } : {}),
         ...(modelId !== undefined && modelId !== "" ? { modelId } : {}),
         ...(groupLimit !== undefined ? { groupLimit } : {}),
-      }),
-    );
+    };
+    const cacheKey = projectId + "::" + usageQuantizeKey(JSON.stringify(usageArgs));
+    const hit = usageCache.get(cacheKey);
+    if (hit && Date.now() - hit.at < USAGE_TTL_MS) return c.json(hit.body);
+    // concurrent identical requests share one in-flight query instead of doubling it
+    let pending = usageInFlight.get(cacheKey);
+    if (!pending) {
+      pending = deps.usageService.query(projectId, usageArgs).finally(() => {
+        usageInFlight.delete(cacheKey);
+      });
+      usageInFlight.set(cacheKey, pending);
+    }
+    const body = await pending;
+    if (usageCache.size > 200) usageCache.clear();
+    usageCache.set(cacheKey, { at: Date.now(), body });
+    return c.json(body);
   });
 
   // Lifetime Token total per Model, for the models page's per-card figure. Takes no filters at

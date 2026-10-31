@@ -32,6 +32,91 @@ CREATE TABLE IF NOT EXISTS model_provider_auth_tokens ( -- Server-side OAuth ref
   PRIMARY KEY (project_id, provider)
 );`;
 
+export const MODEL_HEALTH_SQL = `
+CREATE TABLE IF NOT EXISTS model_health ( -- Per-Project per-model health memory for failover: consecutive transport-failure counts (reset by any success) and manual quality-failure bans. Read by failover target selection (a Project-local echo of tracker's ph_model_pool failure memory); lost rows only mean the next failover round re-learns from zero.
+  project_id      TEXT NOT NULL REFERENCES projects(project_id) ON DELETE CASCADE,
+  provider        TEXT NOT NULL,
+  model_id        TEXT NOT NULL,
+  failures        INTEGER NOT NULL DEFAULT 0,  -- consecutive counted failures (rate_limited/timeout/network/connect_failed); a success resets it
+  last_error      TEXT,                        -- the counted error code of the last failure
+  last_failure_at TEXT,                        -- ISO instant of the last counted failure
+  qfail_count     INTEGER NOT NULL DEFAULT 0,  -- consecutive manual quality failures; QUALITY_FAIL_THRESHOLD within the cooldown bans the model
+  qfail_at        TEXT,                        -- ISO instant of the last quality failure
+  qfail_reason    TEXT,                        -- reason of the last quality failure
+  updated_at      TEXT NOT NULL,
+  PRIMARY KEY (project_id, provider, model_id)
+);`;
+
+export const RUN_OUTCOMES_SQL = `
+CREATE TABLE IF NOT EXISTS run_outcomes ( -- One row per driven run: how it ended (completed | failed | aborted) and the failure code. The substrate run-based coordination reads (autopilot run-failure rules, leader re-evaluation); a retention sweep is a follow-up, the rows are small.
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id TEXT NOT NULL,
+  agent_id   TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  ended_at   TEXT NOT NULL,
+  outcome    TEXT NOT NULL,
+  error_code TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_run_outcomes_session ON run_outcomes(project_id, agent_id, session_id, ended_at);`;
+
+export const SCHEDULE_FIRINGS_SQL = `
+CREATE TABLE IF NOT EXISTS schedule_firings ( -- One row per firing: which session a scheduled (or manual) fire went to and when. Joined with run_outcomes for the run-based autopilot rule (a firing's outcome is its session's earliest run started at/after the fire); a retention sweep is a follow-up.
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id TEXT NOT NULL,
+  agent_id   TEXT NOT NULL,
+  name       TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  fired_at   TEXT NOT NULL,
+  manual     INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_schedule_firings_task ON schedule_firings(project_id, agent_id, name, fired_at);`;
+
+export const INBOX_READS_SQL = `
+CREATE TABLE IF NOT EXISTS inbox_reads ( -- Per-user inbox row state: read + archived per (org, row key). Row keys mirror the web's InboxRow keys (mention/<id>, blocked/<ticket>, done/<ticket>); archived mentions carry a snapshot (message lookup by id has no index).
+  user_id    TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  org_id     TEXT NOT NULL,
+  row_key    TEXT NOT NULL,
+  is_read    INTEGER NOT NULL DEFAULT 0,
+  is_archived INTEGER NOT NULL DEFAULT 0,
+  snapshot   TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, project_id, org_id, row_key)
+);`;
+
+export const SCHEDULE_WEBHOOKS_SQL = `
+CREATE TABLE IF NOT EXISTS schedule_webhook_triggers ( -- One webhook trigger per schedule at most: the bearer token in the public ingress URL is the credential, the optional secret authenticates the sender (HMAC-SHA256). Never leaves the server except the token at creation (once) and the secret's last-4 hint.
+  id          TEXT PRIMARY KEY,
+  project_id  TEXT NOT NULL,
+  agent_id    TEXT NOT NULL,
+  name        TEXT NOT NULL,
+  token       TEXT NOT NULL,
+  provider    TEXT NOT NULL DEFAULT 'generic',
+  secret      TEXT,
+  enabled     INTEGER NOT NULL DEFAULT 1,
+  last_fired_at TEXT,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL,
+  UNIQUE (project_id, agent_id, name),
+  UNIQUE (token)
+);
+CREATE TABLE IF NOT EXISTS schedule_webhook_deliveries ( -- One row per accepted POST to a trigger: the idempotency record (trigger_id, dedupe_key) is unique while the key is set — both engines treat NULL keys as distinct, so keyless deliveries never collide — plus the signature verdict, the outcome, and the firing it caused (replays deliberately cause a second one).
+  id               TEXT PRIMARY KEY,
+  trigger_id       TEXT NOT NULL,
+  dedupe_key       TEXT,
+  event            TEXT NOT NULL DEFAULT '',
+  signature_status TEXT NOT NULL DEFAULT 'not_required',
+  status           TEXT NOT NULL DEFAULT 'queued',
+  firing_id        INTEGER,
+  payload          TEXT NOT NULL DEFAULT '',
+  headers          TEXT NOT NULL DEFAULT '{}',
+  attempt_count    INTEGER NOT NULL DEFAULT 1,
+  created_at       TEXT NOT NULL,
+  UNIQUE (trigger_id, dedupe_key)
+);
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_trigger ON schedule_webhook_deliveries(trigger_id, created_at);`;
+
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS users (
   user_id             TEXT PRIMARY KEY,            -- semantic id doubles as login name: ^[a-z][a-z0-9_-]{1,31}$
@@ -70,6 +155,11 @@ CREATE TABLE IF NOT EXISTS project_members (  -- member grants only; owners are 
 );
 ${MODEL_PROMOTIONS_SQL}
 ${MODEL_PROVIDER_AUTH_TOKENS_SQL}
+${MODEL_HEALTH_SQL}
+${RUN_OUTCOMES_SQL}
+${SCHEDULE_FIRINGS_SQL}
+${INBOX_READS_SQL}
+${SCHEDULE_WEBHOOKS_SQL}
 CREATE TABLE IF NOT EXISTS agents (           -- index only; name/description live in system_config.yaml
   project_id TEXT NOT NULL,
   agent_id   TEXT NOT NULL,
@@ -166,6 +256,9 @@ CREATE TABLE IF NOT EXISTS schedule_state (    -- schedule runtime state (files 
   fired_once      INTEGER NOT NULL DEFAULT 0,  -- one-shot task has fired
   missed          INTEGER NOT NULL DEFAULT 0,  -- one-shot task was missed (flagged by startup/registration reconciliation; not backfilled)
   invalid_reason  TEXT,                        -- invalidation reason (e.g. the bound Session was deleted); NULL=healthy
+  fail_count      INTEGER NOT NULL DEFAULT 0,  -- consecutive firing failures (session creation / send); a success resets it
+  auto_paused_at  TEXT,                        -- auto-pause instant after repeated failures; NULL=firing normally
+  auto_pause_reason TEXT,                      -- why the auto-pause tripped (the firing-failure code)
   PRIMARY KEY (project_id, agent_id, name)
 );
 CREATE TABLE IF NOT EXISTS messaging_bindings ( -- Session ↔ messaging-channel bot bindings (runtime/messaging/ holds the long connections)

@@ -24,7 +24,7 @@
  */
 import fs from "node:fs/promises";
 import { Component, Use } from "@prismshadow/penguin-core/kernel";
-import type { OmniMessage } from "@prismshadow/penguin-core";
+import type { AmspRecord } from "@prismshadow/penguin-core";
 import type { Paths } from "../hmr/capabilities.js";
 import type {
   SearchDocRow,
@@ -231,9 +231,9 @@ export class SessionSearchService implements SessionSearchMechanism {
     for (let i = 0; i < lines.length; i += 1) {
       const text = lines[i]!;
       if (!text) continue;
-      let record: OmniMessage;
+      let record: AmspRecord;
       try {
-        record = JSON.parse(text) as OmniMessage;
+        record = JSON.parse(text) as AmspRecord;
       } catch {
         continue; // A truncated or foreign line: skipped, never fatal.
       }

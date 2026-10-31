@@ -246,6 +246,21 @@ describe("the archive page", () => {
     ).toEqual([ids.scheduled]);
   });
 
+  it("carries the moment a conversation was archived by hand, and no moment for a program's own", async () => {
+    const w = await worldWithPeer();
+    const ids = await seedEveryKind(w);
+    const group = `projectId=${w.p1}&workspace=${enc("/tmp/arch-ws-a")}&limit=50`;
+    const listed = await rows(w.owner, group);
+    const byHand = listed.sessions.find((s) => s.sessionId === ids.byHand);
+    const byProgram = listed.sessions.find((s) => s.sessionId === ids.cliA);
+    // The conversation a person archived carries the moment they filed it away.
+    expect(typeof byHand?.archivedAt).toBe("string");
+    expect(Number.isNaN(Date.parse(byHand?.archivedAt ?? ""))).toBe(false);
+    // A session a program opened is filed away by the listing rule, which has no moment of
+    // its own: it claims none rather than borrowing the conversation's creation time.
+    expect(byProgram?.archivedAt ?? null).toBeNull();
+  });
+
   it("builds a Session's full view only for the rows a page returns, however many are archived", async () => {
     const w = await world();
     for (let i = 0; i < 25; i += 1) {

@@ -14,6 +14,7 @@
  * employee whose company plugins fell behind the library back up to it.
  */
 import { existsSync } from "node:fs";
+import type { DatabaseSync } from "node:sqlite";
 import fs from "node:fs/promises";
 import { wire } from "@prismshadow/penguin-core/kernel";
 import path from "node:path";
@@ -21,6 +22,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { parseOrgTriggerMessage, saveProjectConfig } from "@prismshadow/penguin-core";
 import type { AmspRecord } from "@prismshadow/penguin-core";
 import { openDatabase } from "../src/db/database.js";
+import { InboxReadsRepo } from "../src/db/repos/inbox-reads.js";
 import { MembersRepo } from "../src/db/repos/members.js";
 import { OrgCacheRepo } from "../src/db/repos/organizations.js";
 import { ProjectsRepo } from "../src/db/repos/projects.js";
@@ -168,6 +170,7 @@ describe("organization runtime", () => {
       projects,
       members: wire(MembersRepo, { db }),
       sessions,
+      inboxReads: new InboxReadsRepo(db as unknown as DatabaseSync),
       runner: {
         statusOf: (id) => (busy.has(id) ? "running" : "idle"),
         startTask: async (sessionId, input, opts) => {
@@ -372,7 +375,7 @@ describe("organization runtime", () => {
     expect(parsed?.rest).toContain("Mission: Build a plugin marketplace");
     // The board decides: the init run proposes and stops before hiring anything.
     expect(parsed?.rest).toContain("END THIS RUN");
-    expect(parsed?.rest).toContain("@user:alice");
+    expect(parsed?.rest).toContain("[@alice](mention://user/alice)");
     // The plan names roles and budgets, never a model per role: every hire runs on the
     // organization's model, or the Project's default when the organization names none.
     expect(parsed?.rest).toContain(
@@ -485,6 +488,66 @@ describe("organization runtime", () => {
       agentId: `${ORG}_dev`,
       provider: "custom",
       modelId: "m-bench",
+    });
+  });
+
+  describe("an employee's machine pin", () => {
+    it("hire stores nothing for local and refuses remote ids", async () => {
+      await createOrg();
+      await service.hire(P, ORG, {
+        newAgent: { agentId: HR },
+        title: "HR",
+        reportsTo: CEO,
+        machine: "local",
+      });
+      const entry = (await service.chart(P, ORG)).employees.find((e) => e.agentId === HR)!;
+      expect(entry).not.toHaveProperty("machine");
+      await expect(
+        service.hire(P, ORG, {
+          newAgent: { agentId: `${ORG}_dev` },
+          title: "Developer",
+          reportsTo: CEO,
+          machine: "s25ffaJHXjvUgWSX",
+        }),
+      ).rejects.toMatchObject({ status: 400 });
+    });
+
+    it("patch clears on null, empty and local, and refuses remote ids", async () => {
+      await createOrg();
+      await service.hire(P, ORG, { newAgent: { agentId: HR }, title: "HR", reportsTo: CEO });
+      // Nothing stored, so nothing to clear — but the call succeeds either way.
+      await service.patchEmployee(P, ORG, HR, { machine: null });
+      await service.patchEmployee(P, ORG, HR, { machine: "" });
+      await service.patchEmployee(P, ORG, HR, { machine: "local" });
+      const entry = (await service.chart(P, ORG)).employees.find((e) => e.agentId === HR)!;
+      expect(entry).not.toHaveProperty("machine");
+      await expect(
+        service.patchEmployee(P, ORG, HR, { machine: "s25ffaJHXjvUgWSX" }),
+      ).rejects.toMatchObject({ status: 400 });
+    });
+
+    it("lists a hand-pinned machine from the chart", async () => {
+      await createOrg();
+      await service.hire(P, ORG, { newAgent: { agentId: HR }, title: "HR", reportsTo: CEO });
+      await fs.writeFile(
+        path.join(orgDir(), "org_chart.yaml"),
+        [
+          "employees:",
+          `  - agent_id: ${CEO}`,
+          "    title: CEO",
+          "    reports_to: null",
+          "    workspace: ceo",
+          `  - agent_id: ${HR}`,
+          "    title: HR",
+          `    reports_to: ${CEO}`,
+          "    workspace: hr",
+          "    machine: local",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      const entry = (await service.chart(P, ORG)).employees.find((e) => e.agentId === HR)!;
+      expect(entry.machine).toBe("local");
     });
   });
 
@@ -1276,10 +1339,10 @@ describe("organization runtime", () => {
         text: "nothing to see here",
       });
       await service.sendChannelMessage(P, ORG, "alice", DEFAULT_CHANNEL_ID, {
-        text: "@user:alice the plan is ready",
+        text: "[@alice](mention://user/alice) the plan is ready",
       });
       await service.sendChannelMessage(P, ORG, "alice", DEFAULT_CHANNEL_ID, {
-        text: "@all standup at ten",
+        text: "[@all](mention://all) standup at ten",
       });
 
       const blocked = await service.createTicket(
@@ -1314,8 +1377,8 @@ describe("organization runtime", () => {
       // Newest first, and only the lines that name this person (the ticket changes the
       // scheduler writes name them too, so the assertion is over what a colleague wrote).
       expect(inbox.mentions.filter((m) => m.sender !== "system").map((m) => m.text)).toEqual([
-        "@all standup at ten",
-        "@user:alice the plan is ready",
+        "[@all](mention://all) standup at ten",
+        "[@alice](mention://user/alice) the plan is ready",
       ]);
       expect(inbox.mentions.map((m) => m.text)).not.toContain("nothing to see here");
       for (const m of inbox.mentions) {
@@ -1365,6 +1428,89 @@ describe("organization runtime", () => {
       expect(
         inbox.doneTickets.find((t) => t.ticketId === byHand.ticketId)?.closedAt,
       ).toBeUndefined();
+    });
+
+    it("marks rows read, archives them out of the inbox and brings them back unread-free", async () => {
+      await createOrg();
+      const alice = { userId: "alice" };
+      await service.sendChannelMessage(P, ORG, "alice", DEFAULT_CHANNEL_ID, {
+        text: "[@alice](mention://user/alice) the plan is ready",
+      });
+      const blocked = await service.createTicket(
+        P,
+        ORG,
+        { title: "Blocked one", slug: "b-blocked" },
+        alice,
+      );
+      await service.blockTicket(P, ORG, blocked.ticketId, "waiting on the vendor", undefined, alice);
+
+      const before = (await service.detail(P, ORG, "alice")).inbox!;
+      const mention = before.mentions.find(
+        (m) => m.text === "[@alice](mention://user/alice) the plan is ready",
+      )!;
+      const mentionKey = mention.inboxKey;
+      const blockedKey = `blocked/${blocked.ticketId}`;
+      // The key is the row's identity, and a fresh row starts unread.
+      expect(mentionKey).toBe(`mention/${mention.id}`);
+      expect(mention.inboxRead).toBe(false);
+      expect(before.blockedTickets.map((t) => t.inboxKey)).toContain(blockedKey);
+      expect(before.blockedTickets.find((t) => t.inboxKey === blockedKey)!.inboxRead).toBe(false);
+
+      expect(
+        await service.markInboxRead(P, ORG, "alice", { keys: [mentionKey, blockedKey], read: true }),
+      ).toEqual({ updated: 2 });
+      const readBack = (await service.detail(P, ORG, "alice")).inbox!;
+      expect(readBack.mentions.find((m) => m.inboxKey === mentionKey)?.inboxRead).toBe(true);
+      expect(readBack.blockedTickets.find((t) => t.inboxKey === blockedKey)?.inboxRead).toBe(true);
+
+      await service.markInboxArchived(P, ORG, "alice", {
+        keys: [mentionKey, blockedKey],
+        archived: true,
+        snapshots: { [mentionKey]: mention },
+      });
+      const after = (await service.detail(P, ORG, "alice")).inbox!;
+      expect(after.mentions.map((m) => m.inboxKey)).not.toContain(mentionKey);
+      expect(after.blockedTickets.map((t) => t.inboxKey)).not.toContain(blockedKey);
+
+      // Archived rows are listed separately: the mention from the snapshot the caller sent,
+      // the ticket resolved against the board as it stands now.
+      const archived = await service.archivedInbox(P, ORG, "alice");
+      expect(archived.mentions.map((m) => m.inboxKey)).toEqual([mentionKey]);
+      expect(archived.mentions[0]!.text).toBe("[@alice](mention://user/alice) the plan is ready");
+      expect(archived.mentions[0]!.inboxRead).toBe(true);
+      expect(archived.blockedTickets.map((t) => t.inboxKey)).toEqual([blockedKey]);
+
+      await service.markInboxArchived(P, ORG, "alice", {
+        keys: [mentionKey, blockedKey],
+        archived: false,
+      });
+      const restored = (await service.detail(P, ORG, "alice")).inbox!;
+      expect(restored.mentions.map((m) => m.inboxKey)).toContain(mentionKey);
+      expect(restored.blockedTickets.map((t) => t.inboxKey)).toContain(blockedKey);
+      expect((await service.archivedInbox(P, ORG, "alice")).mentions).toEqual([]);
+    });
+
+    it("refuses a row key it cannot key a row by, and a snapshot that names another message", async () => {
+      await createOrg();
+      const bad = [
+        { keys: [], read: true },
+        { keys: ["mention"], read: true },
+        { keys: ["nope/x"], read: true },
+        { keys: Array.from({ length: 201 }, (_v, i) => `mention/m${i}`), read: true },
+      ];
+      for (const req of bad) {
+        await expect(service.markInboxRead(P, ORG, "alice", req)).rejects.toThrow();
+      }
+      await expect(
+        service.markInboxArchived(P, ORG, "alice", {
+          keys: ["mention/m1"],
+          archived: true,
+          snapshots: { "mention/m1": { id: "m2" } as never },
+        }),
+      ).rejects.toThrow(/snapshot id does not match/);
+      // Nothing was written by the refusals.
+      expect((await service.detail(P, ORG, "alice")).inbox!.mentions).toEqual([]);
+      expect((await service.archivedInbox(P, ORG, "alice")).mentions).toEqual([]);
     });
   });
 
@@ -2181,7 +2327,7 @@ describe("organization runtime", () => {
 
     it("delivers mentions to desks, records the rest, and stops the chain at the limit", async () => {
       const m1 = await service.sendChannelMessage(P, ORG, "alice", DEFAULT_CHANNEL_ID, {
-        text: "@acme_hr welcome, and @nobody too",
+        text: "[@acme_hr](mention://agent/acme_hr) welcome, and [@nobody](mention://user/nobody) too",
       });
       expect(m1.sender).toBe("user:alice");
       expect(m1.hop).toBe(0);
@@ -2194,7 +2340,7 @@ describe("organization runtime", () => {
 
       // HR answers from its desk: hop 1, delivered to the CEO.
       const m2 = await service.sendChannelMessage(P, ORG, "alice", DEFAULT_CHANNEL_ID, {
-        text: `@${CEO} done`,
+        text: `[@${CEO}](mention://agent/${CEO}) done`,
         sessionId: hrDesk,
       });
       expect(m2.sender).toBe(`agent:${HR}`);
@@ -2205,26 +2351,26 @@ describe("organization runtime", () => {
 
       // CEO replies: hop 2, delivered to HR; HR replies: hop 3 = the limit, recorded only.
       const m3 = await service.sendChannelMessage(P, ORG, "alice", DEFAULT_CHANNEL_ID, {
-        text: `@${HR} thanks`,
+        text: `[@${HR}](mention://agent/${HR}) thanks`,
         sessionId: ceoDesk,
       });
       expect(m3.hop).toBe(2);
       expect(started).toHaveLength(3);
       const m4 = await service.sendChannelMessage(P, ORG, "alice", DEFAULT_CHANNEL_ID, {
-        text: `@${CEO} anytime`,
+        text: `[@${CEO}](mention://agent/${CEO}) anytime`,
         sessionId: hrDesk,
       });
       expect(m4.hop).toBe(3);
       expect(m4.mentions).toEqual([`agent:${CEO}`]);
       expect(started).toHaveLength(3);
 
-      // A plain message reaches nobody; @all reaches everyone but the sender.
+      // A plain message reaches nobody; a mention-all reaches everyone but the sender.
       await service.sendChannelMessage(P, ORG, "alice", DEFAULT_CHANNEL_ID, {
         text: "just noting",
       });
       expect(started).toHaveLength(3);
       await service.sendChannelMessage(P, ORG, "alice", DEFAULT_CHANNEL_ID, {
-        text: "@all standup in 5",
+        text: "[@all](mention://all) standup in 5",
       });
       expect(started).toHaveLength(5);
 
@@ -2250,7 +2396,7 @@ describe("organization runtime", () => {
     it("the system's own lines and a paused organization deliver nothing", async () => {
       await service.patch(P, ORG, { status: "paused" }, "alice");
       await service.sendChannelMessage(P, ORG, "alice", DEFAULT_CHANNEL_ID, {
-        text: `@${HR} hello?`,
+        text: `[@${HR}](mention://agent/${HR}) hello?`,
       });
       expect(started).toHaveLength(0);
     });
@@ -2447,7 +2593,7 @@ describe("organization runtime", () => {
         service.sendChannelMessage(P, ORG, "alice", "site", { text: "hello", sessionId: hrDesk }),
       ).rejects.toMatchObject({ status: 403, code: "not_a_member" });
       await expect(
-        service.sendChannelMessage(P, ORG, "alice", "site", { text: `@${HR} look at this` }),
+        service.sendChannelMessage(P, ORG, "alice", "site", { text: `[@${HR}](mention://agent/${HR}) look at this` }),
       ).rejects.toMatchObject({
         status: 400,
         code: "mention_not_member",
@@ -2462,7 +2608,7 @@ describe("organization runtime", () => {
       expect(started).toHaveLength(0);
 
       const msg = await service.sendChannelMessage(P, ORG, "alice", "site", {
-        text: "@all kickoff",
+        text: "[@all](mention://all) kickoff",
       });
       expect(started).toHaveLength(1);
       expect(started[0]!.sessionId).toBe(ceoDesk);
@@ -2479,10 +2625,10 @@ describe("organization runtime", () => {
         ),
       ).toBe(true);
 
-      // The same `@all` in the all-hands channel is every employee.
+      // The same mention-all in the all-hands channel is every employee.
       started.length = 0;
       await service.sendChannelMessage(P, ORG, "alice", DEFAULT_CHANNEL_ID, {
-        text: "@all standup",
+        text: "[@all](mention://all) standup",
       });
       expect(started.map((s) => s.sessionId).sort()).toEqual([ceoDesk, hrDesk].sort());
       expect(parseOrgTriggerMessage(started[0]!.text)?.origin.channel).toBe(DEFAULT_CHANNEL_ID);
@@ -2492,7 +2638,7 @@ describe("organization runtime", () => {
       await service.createChannel(P, ORG, { channelId: "site" }, alice);
       await service.addChannelMember(P, ORG, "site", `agent:${CEO}`, alice);
       const ping = await service.sendChannelMessage(P, ORG, "alice", "site", {
-        text: "@user:alice ping",
+        text: "[@alice](mention://user/alice) ping",
         sessionId: ceoDesk,
       });
       await service.sendChannelMessage(P, ORG, "alice", DEFAULT_CHANNEL_ID, { text: "plain line" });
@@ -2544,7 +2690,7 @@ describe("organization runtime", () => {
 
       // A colleague's line in the same place is unread, and names her.
       await service.sendChannelMessage(P, ORG, "alice", DEFAULT_CHANNEL_ID, {
-        text: "@user:alice have a look",
+        text: "[@alice](mention://user/alice) have a look",
         sessionId: ceoDesk,
       });
       expect(await service.channelMessages(P, ORG, alice, DEFAULT_CHANNEL_ID, {})).toMatchObject({
@@ -2571,7 +2717,7 @@ describe("organization runtime", () => {
       for (let day = 1; day <= 9; day++) {
         nowMs = T0 + day * DAY;
         await service.sendChannelMessage(P, ORG, "alice", DEFAULT_CHANNEL_ID, {
-          text: `@user:alice day ${day}`,
+          text: `[@alice](mention://user/alice) day ${day}`,
           sessionId: ceoDesk,
         });
       }
@@ -2879,7 +3025,7 @@ describe("organization runtime", () => {
       expect(cache.orgIdsOfProject("other_project").size).toBe(0);
     });
 
-    it("calls an employee what the chart calls it, tells two of a name apart, and delivers @name", async () => {
+    it("calls an employee what the chart calls it, tells two of a name apart, and delivers markdown mentions", async () => {
       await createOrg();
       await service.hire(P, ORG, {
         newAgent: { agentId: HR },
@@ -2894,16 +3040,25 @@ describe("organization runtime", () => {
       // Two of a name: each is shown — and addressed — with its id noted.
       await service.patchEmployee(P, ORG, CEO, { name: "小明" });
       expect((await hr()).name).toBe(`小明 (${HR})`);
-      const ambiguous = await service.sendChannelMessage(P, ORG, "alice", "default_channel", {
+      // A bare @name in prose is inert text: it pages nobody, whatever the chart says.
+      const plainAmbiguous = await service.sendChannelMessage(P, ORG, "alice", "default_channel", {
         text: `@小明 (${HR}) 请看一下，@小明 是谁？`,
+      });
+      expect(plainAmbiguous.mentions).toEqual([]);
+      const ambiguous = await service.sendChannelMessage(P, ORG, "alice", "default_channel", {
+        text: `[@小明](mention://agent/${HR}) 请看一下，@小明 是谁？`,
       });
       expect(ambiguous.mentions).toEqual([`agent:${HR}`]);
 
       // Cleared, the Agent's display name stands in again, and the other name is its own.
       await service.patchEmployee(P, ORG, CEO, { name: null });
       expect((await hr()).name).toBe("小明");
-      const byName = await service.sendChannelMessage(P, ORG, "alice", "default_channel", {
+      const plainByName = await service.sendChannelMessage(P, ORG, "alice", "default_channel", {
         text: "@小明你好，也 @" + CEO,
+      });
+      expect(plainByName.mentions).toEqual([]);
+      const byName = await service.sendChannelMessage(P, ORG, "alice", "default_channel", {
+        text: `[@小明](mention://agent/${HR})你好，也 [@${CEO}](mention://agent/${CEO})`,
       });
       expect(byName.mentions).toEqual([`agent:${HR}`, `agent:${CEO}`]);
       await expect(service.patchEmployee(P, ORG, HR, { name: "a@b" })).rejects.toMatchObject({

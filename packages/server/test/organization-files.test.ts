@@ -14,6 +14,7 @@ import {
   parseDesks,
   parseOrgChart,
   parseOrgConfig,
+  parseSquads,
   parseTicket,
   serializeCalendarEvent,
   serializeChannelConfig,
@@ -21,6 +22,7 @@ import {
   serializeDesks,
   serializeOrgChart,
   serializeOrgConfig,
+  serializeSquads,
   serializeTicket,
   slugSuffix,
   slugify,
@@ -128,6 +130,24 @@ describe("org_chart.yaml", () => {
     expect(parsed).toEqual({ ok: true, value: chart });
   });
 
+  it("round-trips an explicit local machine pin, and rejects anything else", () => {
+    const pinned: OrgChart = {
+      employees: [
+        { agentId: "acme_ceo", title: "CEO", reportsTo: null, workspace: ".", machine: "local" },
+      ],
+    };
+    const parsed = parseOrgChart(serializeOrgChart(pinned), "acme");
+    expect(parsed).toEqual({ ok: true, value: pinned });
+    const remote =
+      "employees:\n  - agent_id: acme_ceo\n    title: CEO\n    reports_to: null\n    machine: s25ffaJHXjvUgWSX\n";
+    const r = parseOrgChart(remote, "acme");
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain("machine");
+    const malformed =
+      "employees:\n  - agent_id: acme_ceo\n    title: CEO\n    reports_to: null\n    machine: 'not an id!'\n";
+    expect(parseOrgChart(malformed, "acme").ok).toBe(false);
+  });
+
   it("requires exactly one root and that it is the CEO", () => {
     const noRoot =
       "employees:\n  - agent_id: acme_ceo\n    title: CEO\n    reports_to: acme_hr\n  - agent_id: acme_hr\n    title: HR\n    reports_to: acme_ceo\n";
@@ -171,6 +191,44 @@ describe("desks.toml", () => {
     };
     expect(parseDesks(serializeDesks(desks))).toEqual({ ok: true, value: desks });
     expect(parseDesks("")).toEqual({ ok: true, value: {} });
+  });
+});
+
+describe("squads.toml", () => {
+  it("round-trips squads with roles, instructions and archive marks", () => {
+    const squads = {
+      delivery: {
+        id: "delivery",
+        name: "产品交付",
+        leader: "agent:lead",
+        members: ["agent:lead", "agent:dev", "user:alice"],
+        roles: { "agent:dev": "前端实现" },
+        instructions: "DB 变更先让 qa 看一眼",
+        archived: false,
+      },
+      retired: {
+        id: "retired",
+        name: "旧组",
+        leader: "agent:lead",
+        members: ["agent:lead"],
+        roles: {},
+        instructions: "",
+        archived: true,
+      },
+    };
+    expect(parseSquads(serializeSquads(squads))).toEqual({ ok: true, value: squads });
+    expect(parseSquads("")).toEqual({ ok: true, value: {} });
+  });
+
+  it("rejects bad ids, duplicates, empty names and mistyped fields", () => {
+    expect(parseSquads('[[squads]]\nid = "Bad"\nname = "x"\nleader = "agent:a"\n').ok).toBe(false);
+    const dup =
+      '[[squads]]\nid = "a"\nname = "x"\nleader = "agent:a"\n[[squads]]\nid = "a"\nname = "y"\nleader = "agent:a"\n';
+    expect(parseSquads(dup).ok).toBe(false);
+    expect(parseSquads('[[squads]]\nid = "a"\nname = ""\nleader = "agent:a"\n').ok).toBe(false);
+    expect(
+      parseSquads('[[squads]]\nid = "a"\nname = "x"\nleader = "agent:a"\narchived = "yes"\n').ok,
+    ).toBe(false);
   });
 });
 

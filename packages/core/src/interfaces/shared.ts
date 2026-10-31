@@ -41,7 +41,7 @@ export type { ThinkingLevelName } from "@prismshadow/amsp/records";
  * `error_message`.
  */
 export interface RunCutoff {
-  kind: "abort" | "llm_failure" | "compaction_failure" | "max_turns";
+  kind: "abort" | "llm_failure" | "compaction_failure" | "max_turns" | "tool_loop";
   errorCode?: ErrorCode;
   errorMessage?: string;
 }

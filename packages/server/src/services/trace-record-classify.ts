@@ -8,7 +8,7 @@
  * counts as a turn, a tool call or a produced file). Three private copies of the rule would
  * drift, and the drift shows up as "the sidebar says 9 turns, the overview says 12".
  */
-import type { OmniMessage } from "@prismshadow/penguin-core";
+import type { AmspRecord } from "@prismshadow/penguin-core";
 
 /** How a record reads in a list of things that happened. */
 export type RecordKind = "user" | "assistant" | "thinking" | "tool";
@@ -127,7 +127,7 @@ export function flat(text: string, keep = 600): string {
  * every `event_msg` (token counters and request spans), `tool_call_output` (a file's contents;
  * the reader wants the file, not the blob), and partials (their complete message is on disk).
  */
-export function classifyRecord(record: OmniMessage): ClassifiedRecord | null {
+export function classifyRecord(record: AmspRecord): ClassifiedRecord | null {
   const at = record.timestamp ?? "";
   if (record.type !== "model_msg") return null;
   const payload = record.payload as unknown as Record<string, unknown>;

@@ -25,7 +25,7 @@
 import { open } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { parseTraceLines, readTraceTolerant } from "@prismshadow/penguin-core";
-import type { OmniMessage } from "@prismshadow/penguin-core";
+import type { AmspRecord } from "@prismshadow/penguin-core";
 
 /** First read window; grows geometrically until it holds enough lines or hits the whole file. */
 const TAIL_WINDOW_MIN = 256 * 1024;
@@ -37,7 +37,7 @@ const TAIL_WINDOW_MAX = 8 * 1024 * 1024;
  * head of the shard to get them. `messages[i]` is shard unit `skippedUnits + i`.
  */
 export interface TraceTailRead {
-  messages: OmniMessage[];
+  messages: AmspRecord[];
   /** Units preceding `messages` in the shard; 0 when the read reached the first unit. */
   skippedUnits: number;
 }

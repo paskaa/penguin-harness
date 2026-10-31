@@ -18,8 +18,6 @@ import {
   attachedImageLine,
   isSessionMeta,
   isSteeredBackgroundNotice,
-  isTaskBegin,
-  isTaskRecord,
   matchAttachedFileLine,
   matchAttachedImageLine,
   modelVisiblePath,
@@ -32,7 +30,6 @@ import {
   tracesDir,
 } from "@prismshadow/penguin-core";
 import type { CompactionMode, AmspRecord } from "@prismshadow/penguin-core";
-import { promptLabel } from "./trace-prompt-label.js";
 import type {
   AgentTraceSessionEntry,
   AgentTracesResponse,
@@ -58,6 +55,7 @@ import type { TraceFileRow, TraceSessionRow } from "../db/repos/trace-index.js";
 import { HttpError } from "../http/errors.js";
 import { formatLocalDate } from "../internal/dates.js";
 import { readTraceTailLines } from "../internal/trace-tail.js";
+import { parseTraceFileOffLoop } from "../internal/trace-parse-pool.js";
 import type { TraceTailRead } from "../internal/trace-tail.js";
 import {
   ratesAt,
@@ -353,6 +351,19 @@ export class TraceService implements Traces {
   private lineIndex = new TraceLineIndex();
 
   /**
+   * Full-shard read cache: history shards are append-only JSONL, so (size, mtime)
+   * validates freshness for free. Serves repeat /messages reads of the same shard
+   * (the conversation pane re-reads on every focus) without re-parsing megabytes.
+   * LRU by re-insertion, capped at 40 shards. Callers get a SHALLOW copy: several
+   * splice/sort the array for their own shape.
+   */
+  private shardCache = new Map<string, { parsedBytes: number; messages: AmspRecord[] }>();
+  // in-flight cold parses keyed by shard path: the web's double-fetch fires two
+  // identical reads concurrently; both share ONE worker parse.
+  private shardParseInFlight = new Map<string, Promise<AmspRecord[]>>();
+  private warmAt = new Map<string, number>();
+
+  /**
    * All of this Session's Trace files (sorted by index ascending), served from the
    * index. An empty answer force-reconciles once and retries before being believed:
    * disk is the source of truth, and a gate blind spot (a backdated write, or an
@@ -404,6 +415,41 @@ export class TraceService implements Traces {
    * MUST offset by it; treating a truncated window as a whole shard is what makes a
    * mid-shard window look like the beginning of the transcript.
    */
+  /**
+   * Warm the shard cache for the most recently listed Sessions: the sidebar's poll hands
+   * us its top rows, and their latest shards are parsed here in the worker (deduped,
+   * best-effort) so the conversation open that follows hits a warm cache instead of a
+   * multi-second cold parse.
+   */
+  async warmSessions(
+    rows: ReadonlyArray<{ projectId: string; agentId: string; sessionId: string }>,
+    max = 8,
+  ): Promise<void> {
+    const now = Date.now();
+    let warmed = 0;
+    for (const row of rows.slice(0, max)) {
+      if (warmed >= 4) break;
+      try {
+        const files = this.store.listFilesBySession(row.projectId, row.agentId, row.sessionId);
+        const latest = files.at(-1);
+        if (!latest) continue;
+        const path = traceFilePath(this.root, latest);
+        if (this.shardCache.has(path) || this.shardParseInFlight.has(path)) continue;
+        // Throttle: skip oversized shards (the warm itself would eat the CPU), and warm
+        // the same shard at most once every 10 minutes.
+        const st = await fs.stat(path);
+        if (st.size > 2 * 1024 * 1024) continue;
+        const last = this.warmAt.get(path);
+        if (last !== undefined && now - last < 600000) continue;
+        this.warmAt.set(path, now);
+        await this.readShard(path);
+        warmed++;
+      } catch {
+        // best-effort warm: a failed shard parse just means the open pays the cold read
+      }
+    }
+  }
+
   private async readShard(
     path: string,
     tailFromEnd?: number,
@@ -423,7 +469,78 @@ export class TraceService implements Traces {
       const read: TraceTailRead = await readTraceTailLines(path, tailFromEnd);
       return { messages: read.messages, firstOrdinal: read.skippedUnits };
     }
-    return { messages: await readTraceTolerant(path), firstOrdinal: 0 };
+    // Full-transcript read: append-aware cache (see shardCache). Shards are
+    // append-only JSONL, so a cached prefix stays valid as the file grows — an
+    // actively-appending session re-parses ONLY the newly appended bytes.
+    // st.size < parsedBytes => truncated/rotated => full re-parse.
+    const st = await fs.stat(path);
+    const hit = this.shardCache.get(path);
+    if (hit && st.size >= hit.parsedBytes) {
+      if (st.size > hit.parsedBytes) {
+        const fh = await fs.open(path, "r");
+        try {
+          const len = st.size - hit.parsedBytes;
+          const buf = Buffer.alloc(len);
+          await fh.read(buf, 0, len, hit.parsedBytes);
+          const text = buf.toString("utf-8");
+          const lastNL = text.lastIndexOf("\n");
+          if (lastNL >= 0) {
+            // parseTraceLines tolerates a truncated last line, but only bytes up to
+            // the last complete newline advance the offset — a partial line is
+            // re-read (and completed) on the next call, never skipped forever.
+            const complete = text.slice(0, lastNL + 1);
+            hit.messages.push(...parseTraceLines(complete));
+            hit.parsedBytes += Buffer.byteLength(complete, "utf-8");
+          }
+          // no complete line in the chunk yet: parsedBytes stays put
+        } finally {
+          await fh.close();
+        }
+      }
+      this.shardCache.delete(path);
+      this.shardCache.set(path, hit);
+      return { messages: hit.messages.slice(), firstOrdinal: 0 };
+    }
+    // Cold parse — deduped across concurrent callers (the web's double-fetch shares ONE
+    // worker parse); the multi-second synchronous parseTraceLines runs OFF the event
+    // loop, with a sync fallback that keeps behavior identical if the worker cannot run.
+    let parseP = this.shardParseInFlight.get(path);
+    if (!parseP) {
+      parseP = (async (): Promise<AmspRecord[]> => {
+        let full: AmspRecord[];
+        try {
+          full = await parseTraceFileOffLoop(path);
+        } catch {
+          full = await readTraceTolerant(path);
+        }
+        if (this.shardCache.size >= 40) {
+          const oldest = this.shardCache.keys().next().value;
+          if (oldest !== undefined) this.shardCache.delete(oldest);
+        }
+        // parsedBytes = offset AFTER the last complete newline: readTraceTolerant tolerates a
+        // trailing partial line, but the incremental branch must not skip it forever.
+        let parsed = st.size;
+        if (parsed > 0) {
+          const win = Math.min(8192, parsed);
+          const buf = Buffer.alloc(win);
+          const fh = await fs.open(path, "r");
+          try {
+            await fh.read(buf, 0, win, parsed - win);
+          } finally {
+            await fh.close();
+          }
+          const t = buf.toString("utf-8");
+          const lastNL = t.lastIndexOf("\n");
+          parsed = lastNL >= 0 ? parsed - win + lastNL + 1 : 0;
+        }
+        this.shardCache.set(path, { parsedBytes: parsed, messages: full });
+        return full;
+      })();
+      this.shardParseInFlight.set(path, parseP);
+      void parseP.catch(() => undefined).finally(() => this.shardParseInFlight.delete(path));
+    }
+    const full = await parseP;
+    return { messages: full.slice(), firstOrdinal: 0 };
   }
 
   /**
@@ -1095,13 +1212,8 @@ private async resolveChildAgent(
     for (let i = position.ordinal + 1; i < targetShard.length; i++) {
       const msg = targetShard[i]!;
       const p = msg.payload as { type?: string; status?: string };
-      // The next user Task and housekeeping compaction both belong after the selected reply —
-      // the next Task from its task_begin on, so the fork never ends on an unclosed one.
-      if (
-        isTaskStartingUser(msg) ||
-        isTaskBegin(msg) ||
-        (msg.type === "event_msg" && p.type === "compaction_begin")
-      ) {
+      // The next user Task and housekeeping compaction both belong after the selected reply.
+      if (isTaskStartingUser(msg) || (msg.type === "event_msg" && p.type === "compaction_begin")) {
         break;
       }
       // A Task may contain several assistant segments/requests. Only the final visible reply
@@ -1394,8 +1506,6 @@ private async resolveChildAgent(
     /** Inside the image run that follows a `[user_steering]` text (see the turn-start rule below). */
     let steeringImages = false;
     let sawToolCallThisRequest = false;
-    /** The main Request's tool calls so far (cleared at its request_begin). */
-    let requestCallIds: string[] = [];
     // Compaction interval (compaction_begin..compaction_end): the compaction
     // request's request_begin/request_end and token_usage all fall inside it (see
     // core context-engine's summarize flow), which is used to exclude the
@@ -1458,20 +1568,10 @@ private async resolveChildAgent(
      *   - Other messages belong to the current taskIndex: tool output and
      *     approval decisions arriving after request_end still belong to this
      *     turn (they're the results of tools this turn's Request initiated).
-     *   - A `task_begin` opens the pending span too — it precedes its Task's
-     *     input — but starts no turn by itself: turns are still told apart by
-     *     the markers above, so a Trace counts the same turns with or without
-     *     Task records. A span holding nothing but Task records (a file that
-     *     ends on `compaction_end, task_end, task_begin`) stays with the turn
-     *     before it, and no Task record moves a turn's end time.
      */
     const msgTask: number[] = new Array<number>(messages.length).fill(-1);
     /** The pending new turn's starting point (message index); settled once request_begin determines the taskIndex. */
     let pendingFrom: number | null = null;
-    /** The navigator label of the pending turn: from its first user text that leaves one (see promptLabel). */
-    let pendingPrompt: string | null = null;
-    /** Whether the pending span holds a turn's starting marker, not only a `task_begin` that opened it. */
-    let pendingStartsTurn = false;
 
     for (let mi = 0; mi < messages.length; mi++) {
       const msg = messages[mi]!;
@@ -1522,7 +1622,7 @@ private async resolveChildAgent(
       // message is a genuine new turn). A subagent's messages pass through without closing it:
       // they belong to another session's stream and say nothing about this one's grouping.
       // The Web answers the same "what is one Task" question over the live stream — see
-      // `openSteering` in web/src/lib/amsp/stream-model.ts; the two need to stay in step.
+      // `openSteering` in web/src/lib/omni/stream-model.ts; the two need to stay in step.
       const isImage = !hasOrigin && msg.type === "model_msg" && p.type === "image_url";
       if (!hasOrigin && !isSteeringText && !(isImage && steeringImages)) steeringImages = false;
       if (isSteeringText) steeringImages = true;
@@ -1536,13 +1636,8 @@ private async resolveChildAgent(
         ((p.type === "text" && p.role === "user") || p.type === "image_url");
       const startsCompactionTurn =
         !hasOrigin && msg.type === "event_msg" && p.type === "compaction_begin";
-      if (!hasOrigin && isTaskBegin(msg) && pendingFrom === null) pendingFrom = mi;
       if (startsUserTurn || startsCompactionTurn) {
         if (pendingFrom === null) pendingFrom = mi;
-        pendingStartsTurn = true;
-        if (startsUserTurn && p.type === "text" && pendingPrompt === null) {
-          pendingPrompt = promptLabel(p.text as string);
-        }
         // A user Prompt **always starts a new turn**: judging continuation solely
         // by "did the previous turn call a tool" isn't enough — if the previous
         // turn ended in a retryable status (given up after exhausting retries),
@@ -1560,15 +1655,12 @@ private async resolveChildAgent(
             prevSerialTs = msg.timestamp;
             if (!continuation) taskIndex++; // Not a continuation -> a new Task
             sawToolCallThisRequest = false;
-            requestCallIds = [];
           }
           // Settle taskIndex before opening the span: the span belongs directly to
           // the current Task. Nearest-neighbor pairing: if the previous begin was
           // never closed (process exited mid-run), the span is left open.
           openRequest = { beginTs: msg.timestamp, taskIndex };
           if (compactionActive) openRequest.compaction = true;
-          // The level the request went out at; absent on Traces written before the field.
-          if (typeof p.thinking_level === "string") openRequest.thinkingLevel = p.thinking_level;
           requests.push(openRequest);
           if (!hasOrigin) {
             const t = ensureTask(taskIndex);
@@ -1594,9 +1686,6 @@ private async resolveChildAgent(
                 if (messages[k]!.origin === undefined) msgTask[k] = taskIndex;
               }
               pendingFrom = null;
-              pendingStartsTurn = false;
-              if (pendingPrompt !== null) t.prompt = pendingPrompt;
-              pendingPrompt = null;
             }
             msgTask[mi] = taskIndex;
           }
@@ -1640,18 +1729,6 @@ private async resolveChildAgent(
           if (!hasOrigin) {
             prevSerialTs = null;
             continuation = sawToolCallThisRequest || retryable;
-            // A Request that did not complete: a call of it with no approval decision was
-            // closed with it and never dispatched (the engine decides every call it dispatches
-            // before the Request ends), so it gets no timeline lane — one would render as an
-            // execution spanning the rest of the timeline.
-            if (status !== undefined && status !== "completed") {
-              for (const id of requestCallIds) {
-                const lane = openSpansById.get(id);
-                if (lane === undefined || lane.approvalTs !== undefined) continue;
-                openSpansById.delete(id);
-                toolSpans.splice(toolSpans.indexOf(lane), 1);
-              }
-            }
           }
           if (retryable) reconnectCount++;
           if (openRequest) {
@@ -1799,17 +1876,21 @@ private async resolveChildAgent(
       }
       if (p.type === "tool_call" && typeof p.tool_call_id === "string") {
         if (!hasOrigin) sawToolCallThisRequest = true; // This turn called a tool -> the next turn continues the same Task
+        const callStop = typeof p.stop_reason === "string" ? p.stop_reason : undefined;
         const span: ToolCallSpan = {
           toolCallId: p.tool_call_id,
           name: typeof p.name === "string" ? p.name : "",
           startTs: msg.timestamp,
         };
+        if (callStop !== undefined) span.status = callStop;
         openToolCalls.set(p.tool_call_id, span);
         toolCalls.push(span);
-        // A timeline lane, until the call's Request ends without completing and without having
-        // dispatched it (see request_end).
-        if (!hasOrigin) {
-          requestCallIds.push(p.tool_call_id);
+        // The timeline lane only accepts calls that "will actually be executed":
+        // an interrupt-compensation tool_call (stop_reason other than completed)
+        // never gets an approval/output, and putting it on a lane would render as
+        // a phantom "executing" state spanning the whole timeline — so it's
+        // skipped outright.
+        if (!hasOrigin && (callStop === undefined || callStop === "completed")) {
           const timeline: TraceToolSpan = {
             toolCallId: p.tool_call_id,
             name: typeof p.name === "string" ? p.name : "",
@@ -1825,13 +1906,12 @@ private async resolveChildAgent(
           span.endTs = msg.timestamp;
           const dur = Date.parse(msg.timestamp) - Date.parse(span.startTs);
           if (Number.isFinite(dur)) span.durationMs = dur;
-          // A result written before tool results carried a status reads as completed.
-          span.status = typeof p.status === "string" ? p.status : "completed";
+          if (typeof p.stop_reason === "string") span.status = p.stop_reason;
         }
         const timeline = openSpansById.get(p.tool_call_id);
         if (timeline && timeline.outputTs === undefined) {
           timeline.outputTs = msg.timestamp;
-          timeline.status = typeof p.status === "string" ? p.status : "completed";
+          if (typeof p.stop_reason === "string") timeline.status = p.stop_reason;
         }
       }
     }
@@ -1841,16 +1921,11 @@ private async resolveChildAgent(
     // and forms its own turn — reattaching it to the previous turn would smear
     // two separate user sends together.
     if (pendingFrom !== null) {
-      // Task records alone (the next Task's task_begin behind a closing compaction) are no
-      // turn: they stay with the turn before them.
-      if (pendingStartsTurn) taskIndex++;
+      taskIndex++;
       for (let k = pendingFrom; k < messages.length; k++) {
         if (messages[k]!.origin === undefined) msgTask[k] = taskIndex;
       }
-      if (pendingStartsTurn) {
-        const t = ensureTask(taskIndex);
-        if (pendingPrompt !== null) t.prompt = pendingPrompt;
-      }
+      ensureTask(taskIndex);
     }
 
     // Each turn's message index range and end-of-turn time are always derived from
@@ -1891,9 +1966,6 @@ private async resolveChildAgent(
       // created, and its timestamp has nothing to do with this turn (it also gets
       // rewritten verbatim at the start of a new file after compaction splits the file).
       if (messages[k]!.type === "session_meta") continue;
-      // Nor do Task records: the next Task's task_begin can sit at the end of this turn's
-      // file (behind a closing compaction), written when that next Task started.
-      if (isTaskRecord(messages[k]!)) continue;
       const ts = messages[k]!.timestamp;
       if (t.endTs === "" || ts > t.endTs) t.endTs = ts;
     }

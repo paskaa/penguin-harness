@@ -314,3 +314,7 @@ export * from "./components/layout/measure/use-measured-width";
 // which the Workspace Files panel and the organization handbook both lay out with.
 export * from "./components/files/files-frame/files-layout";
 export * from "./components/files/files-frame/files-frame";
+
+// 进化树新增组件（2026-10-18 整合）
+export * from "./components/chat/attachments/attachments";
+export * from "./components/feedback/pill/pill";

@@ -121,6 +121,10 @@ export abstract class TraceIndex {
 /** Traces: the mechanism TraceService implements. */
 @Interface()
 export abstract class Traces {
+  abstract warmSessions(
+    rows: ReadonlyArray<{ projectId: string; agentId: string; sessionId: string }>,
+    max?: number,
+  ): Promise<void>;
   abstract observeShardRead?: ((path: string) => void) | undefined;
   abstract subagentChildren(
     projectId: string,

@@ -637,6 +637,36 @@ export interface ModelRefDto {
   modelId: string;
 }
 
+/**
+ * One remembered model's health: consecutive transport failures (a success resets) and
+ * manual quality bans. Read by failover target selection; written by request ends and
+ * the quality report endpoint.
+ */
+export interface ModelHealthDto {
+  provider: string;
+  modelId: string;
+  failures: number;
+  lastError: string | null;
+  lastFailureAt: string | null;
+  qfailCount: number;
+  qfailAt: string | null;
+  qfailReason: string | null;
+  qualityBanned: boolean;
+}
+
+/** Health memory rows of one Project, bans resolved at read time. */
+export interface ModelHealthListResponse {
+  health: ModelHealthDto[];
+}
+
+/** What one manual quality report left behind: the count, and whether the ban is now in force. */
+export interface QualityReportResponse {
+  provider: string;
+  modelId: string;
+  count: number;
+  banned: boolean;
+}
+
 /** Three pricing buckets, in USD per million tokens (unit is fixed at usd_per_mtok; not carried in the DTO). */
 export interface ModelPricingDto {
   cacheRead: number;
@@ -2045,6 +2075,13 @@ export interface SessionInfo {
    */
   archived: boolean;
   /**
+   * When the user archived this Session by hand (ISO 8601, the convention of `createdAt` and
+   * `lastActiveAt`); null or absent when they did not — a program opened it and the listing
+   * rule files it away, which has no moment of its own. The archive page shows it, so "when
+   * did I file this conversation away" has an answer next to the conversation's name.
+   */
+  archivedAt?: string | null;
+  /**
    * What this Session's records add up to, present only when the request asked for it
    * (`withStats=1`): the counters a row badge shows (turns / tool calls / produced files) and
    * what it was last doing. Absent means "not asked for", never "none happened".
@@ -2651,6 +2688,19 @@ export interface SessionForkResponse {
 
 export interface SessionResponse {
   session: SessionInfo;
+}
+
+/** One driven run's outcome: how it ended, and the failure code when it failed. */
+export interface SessionRunItem {
+  startedAt: string;
+  endedAt: string;
+  outcome: "completed" | "failed" | "aborted";
+  errorCode?: string;
+}
+
+/** A session's recent runs, newest first. */
+export interface SessionRunsResponse {
+  runs: SessionRunItem[];
 }
 
 export interface SessionPatchRequest {
@@ -3829,6 +3879,15 @@ export type ScheduleServerEvent =
       name: string;
       sessionId: string;
     }
+  /** Repeated firing failures paused the ticks; resume (or a file edit) clears it. */
+  | {
+      type: "schedule_auto_paused";
+      projectId: string;
+      agentId: string;
+      name: string;
+      reason: string;
+      failures: number;
+    }
   /** A workbench of the Agent was (re)loaded — its folder changed, a reload was requested, or a version was restored. */
   | { type: "workbench_updated"; projectId: string; agentId: string; workbench: WorkbenchInfo }
   /** A workbench's folder is gone — removed from the Web App or deleted on disk. */
@@ -4621,7 +4680,8 @@ export interface UsageResponse {
  * The scheduler archives an agent's settled tasks (done / missed / expired) into `schedule/expired/`, so the agent
  * listings show those three only while a queued fire is still to be sent or when the move failed.
  */
-export type ScheduleStatus = "active" | "disabled" | "expired" | "done" | "missed" | "invalid";
+/** Display-facing schedule status: the file's `enabled` only expresses intent; the rest is derived from runtime state. */
+export type ScheduleStatus = "active" | "disabled" | "expired" | "done" | "missed" | "invalid" | "auto_paused";
 
 export interface ScheduleItem {
   /** Filename (without .toml) is the identifier. */
@@ -4642,6 +4702,8 @@ export interface ScheduleItem {
   provider?: string;
   status: ScheduleStatus;
   invalidReason?: string;
+  /** Why the ticks auto-paused (the firing-failure code); present exactly while paused. */
+  autoPauseReason?: string;
   /** Next scheduled fire time (ISO 8601); unset when done/missed/invalid/disabled. */
   nextFireAt?: string;
   /** Most recent actual fire time (ISO 8601). */
@@ -4687,6 +4749,113 @@ export interface ScheduleUpsertRequest {
    * pair is checked against the Project config at save/reconciliation time.
    */
   provider?: string;
+}
+
+/**
+ * POST .../schedules/:name/fire: where the manual firing went — the bound Session
+ * or a fresh one, sent now or queued behind a busy target.
+ */
+export interface ScheduleFireResponse {
+  sessionId: string;
+  /** True when the target Session was busy: the firing waits and is sent once it turns idle. */
+  queued: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Schedule webhook triggers (Multica's "run from a webhook", slimmed)
+// ---------------------------------------------------------------------------
+
+/** Header conventions per provider: `generic` reads Idempotency-Key, `github` reads X-GitHub-Delivery + X-Hub-Signature-256. */
+export type ScheduleWebhookProvider = "generic" | "github";
+
+export interface ScheduleWebhookCreateRequest {
+  provider?: ScheduleWebhookProvider;
+  /** HMAC-SHA256 secret; when set, every delivery must carry a valid signature. */
+  secret?: string;
+}
+
+export interface ScheduleWebhookUpdateRequest {
+  provider?: ScheduleWebhookProvider;
+  /** A new secret, or null to stop requiring signatures. */
+  secret?: string | null;
+  enabled?: boolean;
+}
+
+/** A trigger as the owner reads it: the token never appears here (creation and rotation return it once). */
+export interface ScheduleWebhookView {
+  provider: ScheduleWebhookProvider;
+  enabled: boolean;
+  /**
+   * The ingress path — empty except at creation/rotation, since the path embeds the
+   * bearer token and reading it would be reading the credential. Lost it? Rotate.
+   */
+  path: string;
+  hasSecret: boolean;
+  /** Last 4 chars of the secret, so two secrets tell apart. */
+  secretHint: string | null;
+  lastFiredAt: string | null;
+}
+
+/** Creation and rotation answer: the only responses that carry the bearer token. */
+export interface ScheduleWebhookSecretView extends ScheduleWebhookView {
+  token: string;
+}
+
+export type ScheduleWebhookDeliveryStatus =
+  | "queued"
+  | "accepted"
+  | "skipped"
+  | "ignored"
+  | "duplicate"
+  | "rejected";
+
+export interface ScheduleWebhookDeliveryView {
+  id: string;
+  dedupeKey: string | null;
+  event: string;
+  signatureStatus: string;
+  status: ScheduleWebhookDeliveryStatus;
+  firingId: number | null;
+  payload: string;
+  createdAt: string;
+  attemptCount: number;
+}
+
+export interface ScheduleWebhookDeliveryListResponse {
+  deliveries: ScheduleWebhookDeliveryView[];
+}
+
+/** The public ingress answer: accepted and duplicate both carry the run to watch. */
+export type ScheduleWebhookIngressResponse =
+  | { status: "accepted"; delivery_id: string; run_id: string; queued: boolean }
+  | { status: "duplicate"; delivery_id: string; run_id: string | null }
+  | { status: "ignored"; delivery_id: string; reason: string }
+  | { status: "rejected"; delivery_id: string; reason: string };
+
+// ---------------------------------------------------------------------------
+// Squad review vote (LOCAL-ONLY: this machine's squad registries, not upstream)
+// ---------------------------------------------------------------------------
+
+/** One squad registry's vote-gate switch (GET /api/squad/review-vote). */
+export interface SquadReviewVoteTable {
+  /** Registry key (`hub`, `tracker`). */
+  key: string;
+  /** Display label for the UI. */
+  label: string;
+  /** Absolute path of the `config.json` this row reads and writes. */
+  path: string;
+  /** True = the three-expert panel closes `in_review` tickets; false = a human still does. */
+  reviewVote: boolean;
+}
+
+export interface SquadReviewVoteResponse {
+  tables: SquadReviewVoteTable[];
+}
+
+/** PUT /api/squad/review-vote: `key` omitted flips every registry at once. */
+export interface SquadReviewVoteUpdate {
+  reviewVote: boolean;
+  key?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -6263,6 +6432,8 @@ export interface OrgEmployeeItem {
   /** Monthly budget in USD for this employee plus all subordinates; absent = unbounded. */
   budget?: number;
   model?: { provider: string; modelId: string };
+  /** The machine this employee's sessions run on; absent = this server. */
+  machine?: string;
   state: OrgEmployeeState;
   /**
    * The employee's current desk. Absent while the ledger names none, and while the Session
@@ -6631,9 +6802,37 @@ export interface OrganizationDetail extends OrganizationSummary {
  * each list; each capped at a page.
  */
 export interface OrgInbox {
-  mentions: OrgChannelMessage[];
-  blockedTickets: OrgTicketItem[];
-  doneTickets: Array<OrgTicketItem & { closedAt?: string }>;
+  mentions: OrgInboxMention[];
+  blockedTickets: OrgInboxTicketItem[];
+  doneTickets: Array<OrgInboxTicketItem & { closedAt?: string }>;
+}
+
+/** One mention row: the message plus its stable inbox key and read mark. */
+export interface OrgInboxMention extends OrgChannelMessage {
+  /** Stable key (`mention/<message id>`), shared with the web's row keys. */
+  inboxKey: string;
+  inboxRead: boolean;
+}
+
+/** One ticket row: the item plus its stable inbox key and read mark. */
+export interface OrgInboxTicketItem extends OrgTicketItem {
+  /** Stable key (`blocked/<ticket>` / `done/<ticket>`), shared with the web's row keys. */
+  inboxKey: string;
+  inboxRead: boolean;
+}
+
+/** Mark rows read/unread. */
+export interface OrgInboxReadRequest {
+  keys: string[];
+  read: boolean;
+}
+
+/** Archive/unarchive rows (archived rows leave the inbox; mentions ride a snapshot). */
+export interface OrgInboxArchiveRequest {
+  keys: string[];
+  archived: boolean;
+  /** Mention snapshots by row key (the client already holds the rows it shows). */
+  snapshots?: Record<string, OrgChannelMessage>;
 }
 
 export interface OrganizationCreateRequest {
@@ -6740,6 +6939,11 @@ export interface OrgHireRequest {
   budget?: number;
   duties?: string;
   model?: { provider: string; modelId: string };
+  /**
+   * Pin this employee's sessions to a machine. Single-machine builds accept only
+   * `"local"` (stored as absent, like omitting it); anything else fails validation.
+   */
+  machine?: string;
 }
 
 export interface OrgEmployeePatchRequest {
@@ -6753,6 +6957,8 @@ export interface OrgEmployeePatchRequest {
   duties?: string;
   /** null clears the model (back to the Project default). */
   model?: { provider: string; modelId: string } | null;
+  /** Pin to a machine, or null (or "local", or "") to run here. */
+  machine?: string | null;
 }
 
 export interface OrgCalendarUpsertRequest {
@@ -6788,9 +6994,9 @@ export interface OrgTicketCreateRequest {
   /** The whole Markdown body instead of goal + acceptanceCriteria (the frontmatter is still generated). */
   body?: string;
   /**
-   * The responsible principal: an employee's `agent:<id>` (or bare Agent id) or a member's
-   * `user:<id>`. Default = the caller — the session's employee inside a desk or ticket
-   * session, else the token's or cookie's user.
+   * The responsible principal: an employee's `agent:<id>` (or bare Agent id), a member's
+   * `user:<id>`, or a squad's `squad:<id>` (wakes the squad leader). Default = the caller —
+   * the session's employee inside a desk or ticket session, else the token's or cookie's user.
    */
   owner?: string;
   parent?: string;
@@ -6816,6 +7022,43 @@ export interface OrgTicketMoveRequest {
   status: OrgTicketStatus;
   /** Required when moving into rejected; recorded under Result. */
   reason?: string;
+}
+
+/** One squad: a leader agent that routes, members that do. */
+export interface OrgSquad {
+  id: string;
+  name: string;
+  /** `agent:<id>` of an employee; always a member too. */
+  leader: string;
+  /** `agent:<id>` / `user:<id>` principals. */
+  members: string[];
+  /** member principal → what they suit; context for the leader only. */
+  roles: Record<string, string>;
+  /** Routing rules the leader alone reads. */
+  instructions: string;
+  archived: boolean;
+}
+
+export interface OrgSquadCreateRequest {
+  /** Organization-unique semantic id. */
+  id: string;
+  name: string;
+  /** `agent:<id>` (or bare Agent id) of an employee; joins the members automatically. */
+  leader: string;
+  members?: string[];
+  roles?: Record<string, string>;
+  instructions?: string;
+}
+
+export interface OrgSquadUpdateRequest {
+  name?: string;
+  /** A new leader joins the members automatically; the current leader cannot be removed directly — designate another leader first. */
+  leader?: string;
+  /** Whole-list replacement; must still include the leader in force. */
+  members?: string[];
+  /** Whole-map replacement; every key must name a member in force. */
+  roles?: Record<string, string>;
+  instructions?: string;
 }
 
 export interface OrgTicketBlockRequest {
@@ -6926,6 +7169,8 @@ export type CompanyServerEvent =
     }
   /** A ticket's status, owner, blocked state or contributing sessions changed. */
   | { type: "org_ticket"; projectId: string; orgId: string; ticketId: string; change: string }
+  /** A squad was created, updated or archived. */
+  | { type: "org_squad"; projectId: string; orgId: string; squadId: string; change: string }
   /** Budget warning, pause or resume for an employee. */
   | {
       type: "org_budget";

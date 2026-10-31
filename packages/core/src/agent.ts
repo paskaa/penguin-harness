@@ -269,10 +269,13 @@ export interface CreateSessionOptions {
    */
   sessionId?: string;
   /**
-   * Whether the Session should fail over to the Project's `model_fallback_chain` when a run
-   * hits a rate limit (429). Defaults to false; the server sets it when the Project has a chain.
+   * Whether a rate limit (429) ends the turn instead of riding the reconnect ladder, because
+   * the host has another model to finish it on (see SessionConfig.failoverOnRateLimit). The
+   * host decides: absent = the ladder, which is what a Project with no fallback chain wants.
    */
   failoverOnRateLimit?: boolean;
+  /** Squad tag recorded in session_meta (see {@link SubagentSpawnOptions.squad}); fixed at creation like `source`. */
+  squad?: string;
 }
 
 export interface ResumeSessionOptions {
@@ -281,7 +284,7 @@ export interface ResumeSessionOptions {
   /** Explicit credentials; if unspecified, falls back to the Project config, then to the vendor's environment variable on the same terms as CreateSessionOptions.apiKey. */
   apiKey?: string;
   baseUrl?: string;
-  /** See CreateSessionOptions.failoverOnRateLimit. */
+  /** Whether a rate limit ends the turn for the resumed Session (see CreateSessionOptions.failoverOnRateLimit). */
   failoverOnRateLimit?: boolean;
 }
 
@@ -313,6 +316,10 @@ interface SessionSpec {
   thinkingLevel: ThinkingLevelName | null | undefined;
   subagentDepth: number;
   source: SessionSource;
+  /** Whether a rate limit ends the turn for this Session (see CreateSessionOptions.failoverOnRateLimit). */
+  failoverOnRateLimit?: boolean;
+  /** Squad tag (see {@link CreateSessionOptions.squad}); fixed at creation like `source`. */
+  squad?: string;
 }
 
 /**
@@ -399,14 +406,14 @@ function resolveCompaction(
   config: CompactionConfig | undefined,
   contextWindow: number | undefined,
 ): CompactionSettings {
+  const configured = config?.max_context_length ?? DEFAULT_MAX_CONTEXT_LENGTH;
+  const effective = effectiveMaxContextLength(configured, contextWindow);
   return {
-    maxContextLength: effectiveMaxContextLength(
-      config?.max_context_length ?? DEFAULT_MAX_CONTEXT_LENGTH,
-      contextWindow,
-    ),
+    maxContextLength: effective,
     maxSessionTurns: config?.max_session_turns ?? -1,
     mode: config?.mode === "discard" ? "discard" : "summarize",
     prompt: config?.prompt ?? DEFAULT_COMPACTION_PROMPT,
+    ...(configured > 0 && effective < configured ? { compactionOrigin: "capped_by_window" } : {}),
   };
 }
 
@@ -670,6 +677,7 @@ export class Agent {
       agent_state: state.stateDir,
       workspace: spec.workspaceDir,
       source: spec.source,
+      ...(spec.squad !== undefined ? { squad: spec.squad } : {}),
     };
 
     return {
@@ -781,6 +789,10 @@ export class Agent {
       thinkingLevel: opts.thinkingLevel,
       subagentDepth: opts.subagentDepth ?? 0,
       source: opts.source ?? "user",
+      ...(opts.failoverOnRateLimit !== undefined
+        ? { failoverOnRateLimit: opts.failoverOnRateLimit }
+        : {}),
+      ...(opts.squad !== undefined ? { squad: opts.squad } : {}),
     };
     // The first context: assembled from the Agent State on disk now (never from this Agent
     // object's load-time snapshot — a long-lived Agent, a self-spawned subagent's for
@@ -897,6 +909,9 @@ export class Agent {
       thinkingLevel: undefined,
       subagentDepth: 0,
       source: normalizeSessionSource(meta.source),
+      ...(opts.failoverOnRateLimit !== undefined
+        ? { failoverOnRateLimit: opts.failoverOnRateLimit }
+        : {}),
     };
     // The context follows the Trace. A context a completed compaction closed is opened here
     // for the first time — nothing was produced under any configuration yet — so it is
@@ -1068,6 +1083,9 @@ export class Agent {
       imagesDir: sessionScratchpadDir(root, projectId, agentId, spec.sessionId),
       modelHasVision: context.modelEntry.vision !== false,
       modelSwitch: rt.modelSwitch,
+      ...(spec.failoverOnRateLimit !== undefined
+        ? { failoverOnRateLimit: spec.failoverOnRateLimit }
+        : {}),
       ...(context.maxTurns !== undefined ? { maxTurns: context.maxTurns } : {}),
       // Sandbox command policy, strict-tier like the rest of the context (though
       // Project-owned, never Agent State): read from disk when each context opens, so an
@@ -1142,7 +1160,7 @@ export class Agent {
       // Spawn and run are separate: the same child Session can run for multiple turns
       // (continuing via input_subagent appending a prompt); resource cleanup is
       // consolidated in handle.dispose (called by the managing ManagedSubagentSession).
-      async spawn({ agentId, modelId, provider, thinkingLevel: spawnThinkingLevel }) {
+      async spawn({ agentId, modelId, provider, thinkingLevel: spawnThinkingLevel, squad }) {
         if (subagentDepth >= MAX_SUBAGENT_DEPTH) {
           throw new Error(
             `subagent depth limit ${MAX_SUBAGENT_DEPTH} reached; not spawning another subagent`,
@@ -1203,6 +1221,7 @@ export class Agent {
           thinkingLevel: spawnThinkingLevel ?? parentLevel ?? null,
           subagentDepth: subagentDepth + 1,
           source: "subagent",
+          ...(squad !== undefined ? { squad } : {}),
         });
         return subagentHandleFor(childSession);
       },

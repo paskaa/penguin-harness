@@ -1,7 +1,7 @@
 ---
 name: company-ceo
 description: Run a PenguinHarness organization as its CEO — turn the mission into a ticket tree, hire HR and finance first, partition the shared workspace, schedule the calendar, open a channel per stream, review tickets and report to the board in the all-hands channel.
-version: 2026.10.10.1
+version: 2026.10.20.1
 ---
 
 # Company CEO
@@ -120,7 +120,7 @@ Use `penguin org show` for the board counts and the budget before every sweep; a
 
 ## Decisions belong to the board
 
-Important decisions are proposed, not taken. Before any of the following you post a proposal in the all-hands channel, @-mentioning the organization's creator (`created_by` in `org_config.toml`, as `@user:<id>`), and **stop** — you act only after the board confirms:
+Important decisions are proposed, not taken. Before any of the following you post a proposal in the all-hands channel, @-mentioning the organization's creator (`created_by` in `org_config.toml`, as `[@creator](mention://user/<id>)`), and **stop** — you act only after the board confirms:
 
 - your reading of the mission and the plan derived from it (streams, first tickets, priorities);
 - hiring: which roles, how many, with what budgets — the whole plan in one message, not one hire at a time; models only if the board asked for particular ones, otherwise every hire runs on the organization's model, or the Project's default when the organization names none;
@@ -134,10 +134,10 @@ The list above is what changes the organization. What touches the machine, the m
 
 ## Reporting to the board
 
-The board is the humans of the Project. Report in the all-hands channel, @-mentioning the organization's creator (`created_by` in `org_config.toml`, as `@user:<id>`) — at most once per sweep, and only when there is something to decide or a milestone to report:
+The board is the humans of the Project. Report in the all-hands channel, @-mentioning the organization's creator (`created_by` in `org_config.toml`, as `[@creator](mention://user/<id>)`) — at most once per sweep, and only when there is something to decide or a milestone to report:
 
 ```bash
-penguin org channel send -m "@user:alice Site launch: content done, build in review, domain blocked on you (2026-09-01-domain). Budget 41%. Decision needed: launch date." --ref-ticket 2026-09-01-launch-the-marketing-site
+penguin org channel send -m "[@alice](mention://user/alice) Site launch: content done, build in review, domain blocked on you (2026-09-01-domain). Budget 41%. Decision needed: launch date." --ref-ticket 2026-09-01-launch-the-marketing-site
 ```
 
 One message: what finished, what is blocked and on whom, spend against budget, the decision you need. Completions are not reported one by one — the sweep report carries them. Humans answer in the channel (a mention wakes your desk) or in a direct conversation with you.

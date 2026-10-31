@@ -167,11 +167,25 @@ export class StreamErrorWatcher {
   private readonly toolNames = new Map<string, string>();
   /** Subagent identity: origin → that subagent's `{agentId, sessionId}` (see the file header's attribution section). */
   private readonly originCtx = new Map<string, { agentId: string; sessionId: string }>();
+  /** Whether this run saw a terminal failure (a retried blip does not fail the run). */
+  private failedRun = false;
+  /** The code of the latest terminal failure, for the run outcome record. */
+  private lastFailureCode: string | undefined;
 
   constructor(
     private readonly errors: ErrorSink,
     private readonly ctx: ErrorContext,
   ) {}
+
+  /** True once a terminal failure of this run was recorded (read at wrap-up). */
+  get failed(): boolean {
+    return this.failedRun;
+  }
+
+  /** The latest terminal failure's code, if any failed. */
+  get failureCode(): string | undefined {
+    return this.lastFailureCode;
+  }
 
   /** Consume one outgoing message; messages irrelevant to this watcher are a no-op. */
   observe(msg: AmspRecord): void {
@@ -312,6 +326,10 @@ export class StreamErrorWatcher {
       code: spec.code,
       kind: spec.kind,
     });
+    if (!retried) {
+      this.failedRun = true;
+      this.lastFailureCode = spec.code;
+    }
   }
 
   /** The record prose for a failure resolved without an abort reason (see flush). */
@@ -368,6 +386,8 @@ export class StreamErrorWatcher {
       code: "compaction_failed",
       kind: "unexpected",
     });
+    this.failedRun = true;
+    this.lastFailureCode = "compaction_failed";
   }
 
   // —— Environment (tool execution) ——
@@ -408,5 +428,7 @@ export class StreamErrorWatcher {
       code: `tool_fatal:${name ?? "unknown"}`,
       kind: "expected",
     });
+    this.failedRun = true;
+    this.lastFailureCode = `tool_${p.status}:${name ?? "unknown"}`;
   }
 }

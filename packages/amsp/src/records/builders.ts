@@ -298,6 +298,8 @@ export function compactionBegin(args: {
   mode: CompactionMode;
   context: number;
   turns: number;
+  /** Why this threshold is in force (e.g. `capped_by_window`); absent when it is the Agent's own. */
+  compactionOrigin?: string | undefined;
 }): AmspRecord<CompactionBeginPayload> {
   return event({
     type: "compaction_begin",
@@ -305,6 +307,7 @@ export function compactionBegin(args: {
     mode: args.mode,
     context: args.context,
     turns: args.turns,
+    ...(args.compactionOrigin === undefined ? {} : { compaction_origin: args.compactionOrigin }),
   });
 }
 

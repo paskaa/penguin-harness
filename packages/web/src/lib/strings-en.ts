@@ -9,7 +9,7 @@ import type { PeakWindows } from "../features/models/model-grouping";
 import type { Strings } from "./strings";
 
 export const en: Strings = {
-  appName: "PenguinHarness",
+  appName: "HealthLink",
 
   nav: {
     chat: "Chat",
@@ -2064,6 +2064,16 @@ export const en: Strings = {
   },
 
   models: {
+    fallbackChain: "Fallback chain",
+    /** The chain is what a rate-limited Session moves onto; the first entry is tried first. */
+    fallbackChainHint:
+      "When a model answers 429 (a rate limit or an exhausted quota), the Session moves down this list and finishes the turn there. Empty = no failover.",
+    fallbackChainEmpty: "Not configured: a rate-limited turn retries on its own model.",
+    fallbackChainAdd: "Add to the chain",
+    fallbackChainPick: "Pick a model…",
+    fallbackChainUp: "Move up",
+    fallbackChainDown: "Move down",
+    fallbackChainRemove: "Remove from the chain",
     title: "Models",
     addCustom: "Add custom model",
     addToGroup: "Add model",
@@ -3365,7 +3375,50 @@ export const en: Strings = {
     },
   },
 
+  search: {
+    title: "Search chats",
+    placeholder: "Search every chat in this project — titles and message content",
+    focusHint: "Press / or ⌘K to focus · Esc to clear",
+    agent: "Agent",
+    allAgents: "All agents",
+    workspace: "Workspace",
+    workspacePlaceholder: "Filter by workspace path",
+    /** The time window's label says what it bounds: the server filters on a chat's creation date. */
+    range: "Created",
+    rangeAll: "Any time",
+    rangeToday: "Today",
+    range7d: "Last 7 days",
+    range30d: "Last month",
+    includeArchived: "Include archived",
+    sort: "Sort",
+    sortRelevance: "Most matches",
+    sortRecent: "Recently updated",
+    scopeAll: "every chat in this project",
+    indexing: (indexed: number, total: number) => `indexing (${indexed}/${total})`,
+    found: (n: number) => `${n} chats`,
+    searching: "Searching…",
+    loadMore: "Show more results",
+    loadingMore: "Loading more…",
+    failed: (reason: string) => `Search failed: ${reason}`,
+    /** Nothing typed yet: the field is an invitation, not an empty result set. */
+    idleTitle: "Search for something",
+    idleHint: "Titles work, and so do words from a line you remember.",
+    emptyTitle: (q: string) => `No chat matches “${q}”`,
+    emptyHint: "Try other words, or widen the filters above.",
+    titleOnly: "Title match",
+    /** The sidebar's quick box's way to this page, on the same query. */
+    openFullSearch: "Open in the search page (filters, jump to the hit)",
+    archived: "Archived",
+    matches: (n: number) => `${n} matches`,
+    /** One hit's line: which kind of message the excerpt came out of. */
+    roleUser: "You",
+    roleAssistant: "Answer",
+    roleThinking: "Thinking",
+    roleTool: "Tool",
+    roleOther: "Record",
+  },
   chat: {
+    searchAllSessions: "Search all conversations",
     newSessionMenu: "New chat",
     chooseAgent: "Choose agent",
     chooseModel: "Choose model",
@@ -4355,6 +4408,12 @@ Scenarios:
     archivedStub: {
       note: "This chat is archived. Unarchive it to read it; it returns to the sidebar.",
     },
+    /** A row's squad mark tooltip: work group + short parent id when known. */
+    squadSession: (squad: string, parent?: string) =>
+      `Squad ${squad}${parent ? ` · child of …${parent}` : ""}`,
+    /** Tooltip of a folder-only group's header (nothing active of its own): what its folders hold, plus the Workspace path where the header has one. */
+    folderOnlyGroup: (n: number, path?: string) =>
+      `Folded tasks only: ${n} conversation${n === 1 ? "" : "s"}${path ? ` (${path})` : ""}`,
     /** The skills note's fixed phrase (the count picks the plural); the skill names follow it as `nameList`. */
     skillsLabel: (count: number): string => `Using skill${count === 1 ? "" : "s"}`,
     /** Names listed after a note's fixed phrase (the skills). */

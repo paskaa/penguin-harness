@@ -165,6 +165,12 @@ export interface SessionMetaPayload {
    * `benchmark`; readers narrow what they read through `normalizeSessionSource`.
    */
   source: SessionSource;
+  /**
+   * Squad tag: the multi-agent work group this Session belongs to, set at spawn through
+   * `run_subagent`'s `squad` argument and recorded here so cost attribution and parentage
+   * never depend on parsing a prompt. Absent = no squad.
+   */
+  squad?: string;
 }
 
 /**
@@ -546,6 +552,8 @@ export interface CompactionBeginPayload {
   context: number;
   /** Session cumulative turn count. */
   turns: number;
+  /** Origin marker for the compaction threshold actually in force, e.g. `capped_by_window` when the Agent's configured threshold exceeded the model's window and only the window-derived cap is being used. Absent otherwise. */
+  compaction_origin?: string;
 }
 
 /**

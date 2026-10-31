@@ -34,7 +34,7 @@ import type { ScheduleDefinition } from "../runtime/schedule-file.js";
 import { SEMANTIC_ID_PATTERN } from "../services/ids.js";
 import { employeeNameProblem } from "./names.js";
 import { DEFAULT_CHANNEL_ID, ceoAgentId, isTicketColumn } from "./paths.js";
-import { parsePrincipal } from "./principal.js";
+import { parsePrincipal, principalSquadId } from "./principal.js";
 import { isValidTimeZone } from "./zoned.js";
 
 export type ParseResult<T> = { ok: true; value: T } | { ok: false; error: string };
@@ -250,6 +250,13 @@ export interface OrgEmployee {
   workspace: string;
   budget?: number;
   model?: { provider: string; modelId: string };
+  /**
+   * The machine this employee's sessions run on. Single-machine builds accept only
+   * `"local"` (or nothing, which means the same): anything else fails validation with
+   * a clear error instead of a desk that can never start. Remote ids unlock with the
+   * multi-machine slice, when a second machine exists to verify them against.
+   */
+  machine?: string;
 }
 
 export interface OrgChart {
@@ -304,6 +311,17 @@ function employeeFrom(item: unknown, index: number): ParseResult<OrgEmployee> {
     }
     model = { provider, modelId };
   }
+  // Single-machine builds run every employee here: only absent (or "local", which
+  // reads the same) validates. Anything else is a typo today, and a second machine
+  // away from meaning something — failing fast beats a desk that can never start.
+  const machine = e["machine"];
+  if (machine !== undefined && machine !== null) {
+    if (typeof machine !== "string" || (machine.trim() !== "" && machine.trim() !== "local")) {
+      return fail(
+        `${agentId}: machine must be "local" (this single-machine build runs every employee here)`,
+      );
+    }
+  }
   return {
     ok: true,
     value: {
@@ -315,6 +333,7 @@ function employeeFrom(item: unknown, index: number): ParseResult<OrgEmployee> {
       workspace: workspace.trim(),
       ...(typeof budget === "number" ? { budget } : {}),
       ...(model !== undefined ? { model } : {}),
+      ...(typeof machine === "string" && machine.trim() !== "" ? { machine: machine.trim() } : {}),
     },
   };
 }
@@ -378,6 +397,7 @@ export function serializeOrgChart(chart: OrgChart): string {
       ...(e.model !== undefined
         ? { model: { provider: e.model.provider, model_id: e.model.modelId } }
         : {}),
+      ...(e.machine !== undefined ? { machine: e.machine } : {}),
     })),
   };
   return [
@@ -386,7 +406,8 @@ export function serializeOrgChart(chart: OrgChart): string {
     "# stands in); it and the agent_id both work after @ in a channel.",
     "# joined by reports_to into a tree rooted at the CEO. Budgets are monthly USD caps for an",
     "# employee plus every subordinate; workspace is a sub-directory of the shared workspace",
-    "# (. = all of it) or an absolute path that already exists.",
+    "# (. = all of it) or an absolute path that already exists; machine names the",
+    "# runtime host (only \"local\" on single-machine builds).",
     stringifyYaml(doc, { lineWidth: 0 }).trimEnd(),
     "",
   ].join("\n");
@@ -587,7 +608,7 @@ export function slugSuffix(n: number): string {
 export interface TicketDoc {
   title: string;
   status: OrgTicketStatus;
-  /** The ONE responsible principal (`agent:<id>` / `user:<id>`); every ticket has one. */
+  /** The ONE responsible principal (`agent:<id>` / `user:<id>` / `squad:<id>`); every ticket has one. */
   owner: string;
   parent?: string;
   notify: string[];
@@ -722,7 +743,9 @@ function ticketFields(front: Record<string, unknown>): ParseResult<TicketFields>
     return fail(`status must be one of the board columns, got \`${status}\``);
   }
   const owner = str("owner");
-  if (!isPersonPrincipal(owner)) return fail("owner must be agent:<id> or user:<id>");
+  if (!isPersonPrincipal(owner) && principalSquadId(owner) === null) {
+    return fail("owner must be agent:<id>, user:<id> or squad:<id>");
+  }
   const parent = str("parent");
   if (parent !== "" && !TICKET_ID_PATTERN.test(parent)) return fail("parent must be a ticket id");
   const notifyList = front["notify"];
@@ -1054,7 +1077,9 @@ export function parseChannelMessageLine(line: string): ParseResult<OrgChannelMes
   const mentions = o["mentions"] ?? [];
   if (
     !Array.isArray(mentions) ||
-    mentions.some((m) => typeof m !== "string" || parsePrincipal(m) === null)
+    mentions.some(
+      (m) => typeof m !== "string" || (parsePrincipal(m) === null && principalSquadId(m) === null),
+    )
   ) {
     return fail("mentions must be a list of principals");
   }
@@ -1123,4 +1148,113 @@ export function serializeChannelMessageLine(msg: OrgChannelMessage): string {
     ...(refs !== undefined && Object.keys(refs).length > 0 ? { refs } : {}),
     ...(msg.notice !== undefined ? { notice: msg.notice } : {}),
   });
+}
+
+// ---------------------------------------------------------------------------
+// squads.toml
+// ---------------------------------------------------------------------------
+
+/**
+ * One squad: a leader agent that routes, members that do, role descriptions that tell
+ * the leader who suits what (context only — no permissions, no auto-trigger), and
+ * instructions the leader alone reads. Archived squads stay in the file (history keeps
+ * pointing at them) but leave every picker.
+ */
+export interface SquadDoc {
+  id: string;
+  name: string;
+  /** `agent:<id>` of an employee; always a member too. */
+  leader: string;
+  /** `agent:<id>` / `user:<id>` principals. */
+  members: string[];
+  /** member principal → what they suit; absent entries suit whatever the leader judges. */
+  roles: Record<string, string>;
+  instructions: string;
+  archived: boolean;
+}
+
+export type Squads = Record<string, SquadDoc>;
+
+export function parseSquads(raw: string): ParseResult<Squads> {
+  if (raw.trim() === "") return { ok: true, value: {} };
+  const t = tomlTable(raw);
+  if (!t.ok) return t;
+  const list = t.value["squads"];
+  if (list === undefined) return { ok: true, value: {} };
+  if (!Array.isArray(list)) return fail("squads must be a list of tables");
+  const squads: Squads = {};
+  for (let i = 0; i < list.length; i++) {
+    const v = list[i];
+    if (v === null || typeof v !== "object" || Array.isArray(v)) {
+      return fail(`squads[${i}] is not a table`);
+    }
+    const s = v as Record<string, unknown>;
+    const id = s["id"];
+    if (typeof id !== "string" || !SEMANTIC_ID_PATTERN.test(id)) {
+      return fail(`squads[${i}].id must match ${SEMANTIC_ID_PATTERN}`);
+    }
+    if (squads[id] !== undefined) return fail(`duplicate squad id: ${id}`);
+    const name = s["name"];
+    if (typeof name !== "string" || name.trim() === "") {
+      return fail(`${id}: name must be a non-empty string`);
+    }
+    const leader = s["leader"];
+    if (typeof leader !== "string" || leader.trim() === "") {
+      return fail(`${id}: leader must be an agent principal`);
+    }
+    const members = s["members"];
+    if (
+      members !== undefined &&
+      (!Array.isArray(members) || members.some((m) => typeof m !== "string"))
+    ) {
+      return fail(`${id}: members must be a list of principals`);
+    }
+    const roles = s["roles"];
+    if (
+      roles !== undefined &&
+      (roles === null ||
+        typeof roles !== "object" ||
+        Array.isArray(roles) ||
+        Object.values(roles as Record<string, unknown>).some((r) => typeof r !== "string"))
+    ) {
+      return fail(`${id}: roles must map member principals to strings`);
+    }
+    const instructions = s["instructions"];
+    if (instructions !== undefined && typeof instructions !== "string") {
+      return fail(`${id}: instructions must be a string`);
+    }
+    const archived = s["archived"];
+    if (archived !== undefined && typeof archived !== "boolean") {
+      return fail(`${id}: archived must be a boolean`);
+    }
+    squads[id] = {
+      id,
+      name: name.trim(),
+      leader: leader.trim(),
+      members: ((members as string[] | undefined) ?? []).map((m) => m.trim()),
+      roles: { ...((roles as Record<string, string> | undefined) ?? {}) },
+      instructions: (instructions as string | undefined) ?? "",
+      archived: (archived as boolean | undefined) ?? false,
+    };
+  }
+  return { ok: true, value: squads };
+}
+
+export function serializeSquads(squads: Squads): string {
+  const list = Object.values(squads)
+    .sort((a, b) => a.id.localeCompare(b.id))
+    .map((s) => ({
+      id: s.id,
+      name: s.name,
+      leader: s.leader,
+      members: s.members,
+      ...(Object.keys(s.roles).length > 0 ? { roles: s.roles } : {}),
+      ...(s.instructions !== "" ? { instructions: s.instructions } : {}),
+      ...(s.archived ? { archived: true } : {}),
+    }));
+  return [
+    "# squads.toml — cross-reporting-line groups (an intent file people and the API write): leader routes, members do.",
+    stringifyToml({ squads: list }),
+    "",
+  ].join("\n");
 }

@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { employeeNameProblem, employeeNames, findMentions } from "../src/organization/names.js";
-import type { MentionHandle } from "../src/organization/names.js";
 
 const e = (agentId: string, name?: string) => ({
   agentId,
@@ -51,62 +50,49 @@ describe("employee names", () => {
 });
 
 describe("mentions", () => {
-  const handles: MentionHandle[] = [
-    { handle: "acme_dev_a", principal: "agent:acme_dev_a" },
-    { handle: "小明", principal: "agent:acme_dev_a" },
-    { handle: "小明明", principal: "agent:acme_dev_b" },
-    { handle: "Ada Lovelace", principal: "agent:acme_ada" },
-    { handle: "ann", principal: "user:ann" },
-    { handle: "all", principal: "all" },
-  ];
-  const explicit = (kind: "agent" | "user", id: string) =>
-    kind === "agent" && id === "acme_dev_a" ? "agent:acme_dev_a" : null;
+  const explicit = (kind: "agent" | "user" | "squad", id: string) =>
+    (kind === "agent" && id === "acme_dev_a") ||
+    (kind === "user" && id === "ann") ||
+    (kind === "squad" && id === "delivery")
+      ? `${kind}:${id}`
+      : null;
   const found = (text: string) =>
-    findMentions(text, handles, explicit).map((m) => [text.slice(m.start, m.end), m.principal]);
+    findMentions(text, explicit).map((m) => [text.slice(m.start, m.end), m.principal]);
 
-  it("reaches the same employee by id and by name", () => {
-    expect(found("@acme_dev_a 看一下，@小明 也看一下")).toEqual([
-      ["@acme_dev_a", "agent:acme_dev_a"],
-      ["@小明", "agent:acme_dev_a"],
+  it("resolves the exact markdown forms for every kind, spanning the whole link", () => {
+    expect(
+      found("ping [@Dev A](mention://agent/acme_dev_a) and [@Ann](mention://user/ann)."),
+    ).toEqual([
+      ["[@Dev A](mention://agent/acme_dev_a)", "agent:acme_dev_a"],
+      ["[@Ann](mention://user/ann)", "user:ann"],
+    ]);
+    expect(found("route to [@Squad](mention://squad/delivery) please")).toEqual([
+      ["[@Squad](mention://squad/delivery)", "squad:delivery"],
+    ]);
+    expect(found("[@Everyone](mention://all) standup")).toEqual([
+      ["[@Everyone](mention://all)", "all"],
     ]);
   });
 
-  it("needs no space after a name in a script that has none, and takes the longest name", () => {
-    expect(found("@小明你好")).toEqual([["@小明", "agent:acme_dev_a"]]);
-    expect(found("@小明明你好")).toEqual([["@小明明", "agent:acme_dev_b"]]);
+  it("trusts the URL, never the label — and drops unknown or archived targets", () => {
+    expect(found("[@Liar](mention://agent/acme_dev_a)")).toEqual([
+      ["[@Liar](mention://agent/acme_dev_a)", "agent:acme_dev_a"],
+    ]);
+    expect(found("[@Ghost](mention://agent/ghost)")).toEqual([]);
+    expect(found("[@Ghost](mention://squad/ghost)")).toEqual([]);
   });
 
-  it("matches a name with a space in it, whole", () => {
-    expect(found("ping @Ada Lovelace please")).toEqual([["@Ada Lovelace", "agent:acme_ada"]]);
+  it("leaves every bare @ form as prose: ids, names, all, explicit prefixes", () => {
+    expect(found("@acme_dev_a 看一下，@小明 也看一下")).toEqual([]);
+    expect(found("(@ann) @all. thanks @ann.")).toEqual([]);
+    expect(found("@agent:acme_dev_a and @squad:delivery and @user:ann")).toEqual([]);
+    expect(found("mail me at bob@ann.example")).toEqual([]);
   });
 
-  it("ends an ASCII handle at the end of its word, and leaves addresses and unknowns as text", () => {
-    expect(found("@anna and mail me at bob@ann.example, @nobody")).toEqual([]);
-    expect(found("(@ann) @all.")).toEqual([
-      ["@ann", "user:ann"],
-      ["@all", "all"],
-    ]);
-  });
-
-  it("lets no handle stop short of an id-shaped token that runs on through - or .", () => {
-    expect(found("@all-hands meeting, ask @ann.smith")).toEqual([]);
-    expect(found("ask @acme_dev_a-ops or @acme_dev_a.b")).toEqual([]);
-    // A sentence's own punctuation after the handle is not part of it.
-    expect(found("thanks @ann. Then @all, and @ann- done")).toEqual([
-      ["@ann", "user:ann"],
-      ["@all", "all"],
-      ["@ann", "user:ann"],
-    ]);
-    // A name in a script without word boundaries still needs none, whatever follows.
-    expect(found("@小明-你好 @小明.ok")).toEqual([
-      ["@小明", "agent:acme_dev_a"],
-      ["@小明", "agent:acme_dev_a"],
-    ]);
-  });
-
-  it("keeps the explicit forms", () => {
-    expect(found("@agent:acme_dev_a. and @agent:ghost")).toEqual([
-      ["@agent:acme_dev_a", "agent:acme_dev_a"],
-    ]);
+  it("needs the @-label and the exact scheme: ordinary links never page", () => {
+    expect(found("[Dev A](mention://agent/acme_dev_a)")).toEqual([]);
+    expect(found("[@Dev A](mention://member/acme_dev_a)")).toEqual([]);
+    expect(found("[@Dev A](https://example.com)")).toEqual([]);
+    expect(found("[@Dev A](mention://agent/acme_dev_a")).toEqual([]);
   });
 });

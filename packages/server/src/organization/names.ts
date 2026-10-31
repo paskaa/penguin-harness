@@ -2,13 +2,18 @@
  * What an employee is called, and how a channel message addresses one.
  *
  * An employee has an id (the Agent's: ASCII, fixed, what files and commands use) and a NAME —
- * written in its chart entry, for people: any script, spaces allowed. Both address it in a
- * channel: `@acme_dev_a` and `@小明` reach the same desk.
+ * written in its chart entry, for people: any script, spaces allowed. The name is display:
+ * chips, rosters and menus show it, but nothing is ADDRESSED by it. Addressing is exact,
+ * Multica's shape with this server's principal spelling: only
+ * `[@Label](mention://agent|user|squad/<id>)` — and `[@All](mention://all)` — names
+ * someone, and the URL names them, never the label. A bare `@name`, `@id`, `@all` or
+ * `@agent:<id>` in prose is inert text: it pages nobody, which is what keeps a sentence
+ * about "@ceo" from waking the CEO.
  *
  * A name is the organization's to give, so it is the chart's field rather than the Agent's
  * display name (which stays the fallback for an entry that has none, then the id). Names need
  * not be unique as written: two employees called the same are told apart by the system, which
- * shows — and lets people @ — each as `name (id)`. A name nobody else has stays bare.
+ * shows each as `name (id)`.
  */
 import type { OrgEmployee } from "./files.js";
 
@@ -31,9 +36,10 @@ export function employeeNameProblem(raw: string): string | null {
  * for an entry without a name of its own (the Agent's display name, else the id).
  *
  * A base name is kept bare only when it is nobody else's: not another employee's name, not
- * another employee's id, not a member's user id, not `all` — each of those is something `@`
- * already means. Otherwise the id is appended as the note, and every holder of a shared name
- * gets one, so which of two 小明 keeps the bare form never depends on the order of the chart.
+ * another employee's id, not a member's user id, not `all` — each of those would read
+ * ambiguously beside it. Otherwise the id is appended as the note, and every holder of a
+ * shared name gets one, so which of two 小明 keeps the bare form never depends on the
+ * order of the chart.
  */
 export function employeeNames(
   employees: readonly Pick<OrgEmployee, "agentId" | "name">[],
@@ -57,81 +63,45 @@ export function employeeNames(
   return out;
 }
 
-/** Something `@` can name in a channel, and the principal it stands for. */
-export interface MentionHandle {
-  handle: string;
-  /** `agent:<id>`, `user:<id>` or `all`. */
-  principal: string;
-}
-
-const WORD = /[A-Za-z0-9_]/;
-const EXPLICIT = /^(agent|user):([A-Za-z0-9][A-Za-z0-9_.-]*)/;
-
-/**
- * Whether `rest` (the text after `@`, known to start with `handle`) lets the handle end there.
- * A handle ending in an ASCII word character must end its word: the next character is not a
- * word character, nor a `-` or `.` that goes on into one — an id-shaped token runs through
- * those (`@all-hands`, `@alice.smith` name neither `all` nor `alice`), while a sentence's
- * own `.` or `,` after the handle does not. Any other handle needs no boundary. The web
- * composer's highlighting applies the same rule (features/company/channel-mentions.ts).
- */
-function endsHandle(handle: string, rest: string): boolean {
-  if (!WORD.test(handle[handle.length - 1]!)) return true;
-  const next = rest[handle.length] ?? "";
-  if (WORD.test(next)) return false;
-  return !((next === "-" || next === ".") && WORD.test(rest[handle.length + 1] ?? ""));
-}
-
-/** A mention found in a text: where it is (the `@` included) and whom it names. */
+/** A mention found in a text: where it is (the whole markdown span) and whom it names. */
 export interface MentionMatch {
   start: number;
   end: number;
   principal: string;
 }
 
+// `[@Label](mention://agent|user|squad/<id>)` and `[@Label](mention://all)`: the label
+// must itself start with `@`, so an ordinary link can never page someone by accident.
+// The id runs to the closing paren or whitespace, exact — no trailing-punctuation
+// trimming, since punctuation lives outside the URL by construction.
+const MENTION_MD =
+  /\[(@[^\]\n]*)\]\(mention:\/\/(?:(agent|user|squad)\/([^)\s]+)|(all))\)/g;
+
 /**
- * The mentions of a text, resolved against what can be named.
+ * The mentions of a text: the exact markdown forms, resolved against what can be named.
+ * `explicit` validates a kind/id pair against the live organization (an employee's id,
+ * a member's user id, a live squad's id) and answers its principal, or null when the
+ * pair names nothing — an unknown or archived target reads as text. `all` needs no
+ * validation. The label is display only: a lying label still reaches the URL's owner.
  *
- * A name may be in any script and may hold spaces, so a mention cannot be cut out of the text
- * by a pattern: `@小明你好` has no delimiter after the name. It is matched instead — at each
- * `@` that does not continue a word (so `a@b.c` is an address, not a mention), the LONGEST
- * handle that the text continues with wins, which is what tells `@小明明` from `@小明`. A
- * handle ending in an ASCII word character must end the word there (`@ann` is not found in
- * `@anna` nor in `@ann-marie`, see endsHandle); one ending in anything else needs no
- * boundary, since such scripts have none.
- *
- * `@agent:<id>` and `@user:<id>` stay the explicit forms, resolved by `explicit`. A `@` that
- * names nothing is text.
+ * Nothing else mentions: a bare `@name`, `@id`, `@all` or `@agent:<id>` is prose, full
+ * stop — that is what keeps "@ceo" in a sentence from paging the CEO.
  */
 export function findMentions(
   text: string,
-  handles: readonly MentionHandle[],
-  explicit: (kind: "agent" | "user", id: string) => string | null,
+  explicit: (kind: "agent" | "user" | "squad", id: string) => string | null,
 ): MentionMatch[] {
-  const byLength = [...handles].sort((a, b) => b.handle.length - a.handle.length);
   const out: MentionMatch[] = [];
-  for (let at = text.indexOf("@"); at !== -1; at = text.indexOf("@", at + 1)) {
-    const before = at === 0 ? "" : text[at - 1]!;
-    if (before === "@" || WORD.test(before)) continue;
-    const rest = text.slice(at + 1);
-    const tagged = EXPLICIT.exec(rest);
-    if (tagged !== null) {
-      const id = tagged[2]!.replace(/[.-]+$/, "");
-      const principal = explicit(tagged[1] as "agent" | "user", id);
-      if (principal !== null) {
-        const end = at + 1 + tagged[1]!.length + 1 + id.length;
-        out.push({ start: at, end, principal });
-        at = end - 1;
-      }
+  MENTION_MD.lastIndex = 0;
+  for (let m = MENTION_MD.exec(text); m !== null; m = MENTION_MD.exec(text)) {
+    if (m[4] === "all") {
+      out.push({ start: m.index, end: m.index + m[0].length, principal: "all" });
       continue;
     }
-    const hit = byLength.find(
-      ({ handle }) => handle !== "" && rest.startsWith(handle) && endsHandle(handle, rest),
-    );
-    if (hit === undefined) continue;
-    const end = at + 1 + hit.handle.length;
-    out.push({ start: at, end, principal: hit.principal });
-    at = end - 1;
+    const principal = explicit(m[2] as "agent" | "user" | "squad", m[3]!);
+    if (principal !== null) {
+      out.push({ start: m.index, end: m.index + m[0].length, principal });
+    }
   }
   return out;
 }

@@ -127,7 +127,7 @@ import {
   workspaceLabel,
 } from "../../lib/session-grouping";
 import { machineForSession } from "../../lib/session-machines";
-import { backgroundSourceMark } from "../../lib/session-source-mark";
+import { backgroundSourceMark, squadMark } from "../../lib/session-source-mark";
 import { nameOnMachine } from "../../lib/workspace-machines";
 import {
   initialNavGroupCollapsed,
@@ -224,6 +224,9 @@ import {
   parseOrgKey,
 } from "../../features/company/company-nav";
 import type { WorkMode } from "../../features/company/company-nav";
+
+/** Magnifier for the search row: the page the whole Project's conversations can be searched from. */
+const SEARCH_SESSIONS_ICON = "M21 21l-4.35-4.35M17 11a6 6 0 1 1-12 0 6 6 0 0 1 12 0z";
 
 /** New-chat pen over a baseline (the pinned "New chat" button and the collapsed rail share it). */
 export const NEW_CHAT_ICON = ICONS.penLine;
@@ -2085,6 +2088,14 @@ export function Sidebar({
                   onClick={() => newChat()}
                   className="font-medium"
                 />
+                {/* The search page, one row under New chat: it is the other thing a person
+                    reaches for from the list itself, and the list can only page a title. */}
+                <NavRow
+                  surface="muted"
+                  label={S.chat.searchAllSessions}
+                  glyph={SEARCH_SESSIONS_ICON}
+                  onClick={() => navigate("/search")}
+                />
               </SidebarNavArea>
             ),
           })}
@@ -2799,6 +2810,7 @@ function SidebarSessionRow({
       // nothing) and whether it owns work that outlives the turn (background tasks, live via
       // session_background).
       {...(backgroundSourceMark(s) ?? {})}
+      {...(squadMark(s) ?? {})}
       {...(pinned ? { pinnedLabel: S.chat.pinnedSession } : {})}
       {...(s.messagingChannel !== undefined
         ? { relayLabel: S.messaging.enabledIndicator[s.messagingChannel] }

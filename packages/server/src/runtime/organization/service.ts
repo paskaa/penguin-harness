@@ -30,7 +30,12 @@ import type {
   OrgFinanceResponse,
   OrgHireRequest,
   OrgInbox,
+  OrgInboxArchiveRequest,
+  OrgInboxReadRequest,
   OrgSessionsResponse,
+  OrgSquad,
+  OrgSquadCreateRequest,
+  OrgSquadUpdateRequest,
   OrgTicketCreateRequest,
   OrgTicketDetail,
   OrgTicketHistoryAction,
@@ -52,6 +57,9 @@ import type {
 import { TICKET_SLUG_PATTERN } from "../../api/types.js";
 import { Interface, Module, Provide, Use } from "@prismshadow/penguin-core/kernel";
 import type { ClassCtx } from "@prismshadow/penguin-core/kernel";
+import type { DatabaseSync } from "node:sqlite";
+import type { Db } from "../../hmr/capabilities.js";
+import { InboxReadsRepo } from "../../db/repos/inbox-reads.js";
 import { HttpError } from "../../http/errors.js";
 import { userChannelKey } from "../../http/routes/events.js";
 import type { Channels, Clock, Config, Log } from "../../hmr/capabilities.js";
@@ -70,7 +78,7 @@ import type { Settings } from "../../mechanisms/settings.js";
 import type { Errors, UsageQueries } from "../../mechanisms/observability.js";
 import { OrgStore } from "../../organization/store.js";
 import { badRequest } from "../../http/validate.js";
-import type { ChannelConfig, OrgConfig, OrgEmployee, TicketDoc } from "../../organization/files.js";
+import type { ChannelConfig, OrgConfig, OrgEmployee, SquadDoc, Squads, TicketDoc } from "../../organization/files.js";
 import {
   BUDGET_RATIO_MAX,
   DEFAULT_CEO_BUDGET,
@@ -103,6 +111,8 @@ import {
   agentPrincipal,
   parsePrincipal,
   principalAgentId,
+  principalSquadId,
+  squadPrincipal,
   userPrincipal,
 } from "../../organization/principal.js";
 import { isValidTimeZone, zonedDate, zonedDayRange } from "../../organization/zoned.js";
@@ -120,7 +130,6 @@ import { loadOrg, orgEmployeeNames, projectUserIds, sharedWorkspace } from "./mo
 import type { LoadedOrg } from "./model.js";
 import { parseAvatarDataUrl, readAvatar, writeAvatar } from "../../organization/avatars.js";
 import { employeeNameProblem, findMentions } from "../../organization/names.js";
-import type { MentionHandle } from "../../organization/names.js";
 import {
   channelArchiveChanged,
   channelCreated,
@@ -469,7 +478,7 @@ export class OrganizationService {
         blockedByMe: items.filter((t) => t.blockedBy === me),
       },
       recentMessages: recent?.messages.slice(-20) ?? [],
-      inbox: this.inbox(spend, items, tickets, recent?.messages ?? [], me),
+      inbox: this.inbox(projectId, orgId, userId, spend, items, tickets, recent?.messages ?? [], me),
       alerts: this.alerts(org, spend.period),
       ...(ceoDesk !== undefined ? { ceoDeskSessionId: ceoDesk.sessionId } : {}),
     };
@@ -492,16 +501,24 @@ export class OrganizationService {
    * descending is ordering by age.
    */
   private inbox(
+    projectId: string,
+    orgId: string,
+    userId: string,
     spend: OrgSpend,
     items: readonly OrgTicketItem[],
     tickets: readonly LoadedTicket[],
     windowMessages: readonly OrgChannelMessage[],
     me: string,
   ): OrgInbox {
+    const states = this.deps.inboxReads?.states(userId, projectId, orgId) ?? new Map();
+    const live = (key: string): boolean => states.get(key)?.archived !== true;
+    const read = (key: string): boolean => states.get(key)?.read === true;
     const mentions = windowMessages
       .filter((m) => m.mentions.includes(me) || m.mentions.includes("all"))
       .reverse()
-      .slice(0, INBOX_PAGE);
+      .slice(0, INBOX_PAGE)
+      .map((m) => ({ ...m, inboxKey: `mention/${m.id}`, inboxRead: read(`mention/${m.id}`) }))
+      .filter((m) => live(m.inboxKey));
     const newestFirst = <T extends { ticketId: string }>(a: T, b: T): number =>
       a.ticketId < b.ticketId ? 1 : a.ticketId > b.ticketId ? -1 : 0;
     const closedAt = new Map<string, string>();
@@ -518,14 +535,23 @@ export class OrganizationService {
       .filter((t) => t.status === "done")
       .map((t): OrgInbox["doneTickets"][number] => {
         const at = closedAt.get(t.ticketId);
-        return { ...t, ...(at !== undefined ? { closedAt: at } : {}) };
+        const inboxKey = `done/${t.ticketId}`;
+        return { ...t, ...(at !== undefined ? { closedAt: at } : {}), inboxKey, inboxRead: read(inboxKey) };
       })
       .filter((t) => t.closedAt === undefined || inPeriod(t.closedAt))
+      .filter((t) => live(t.inboxKey))
       .sort(newestFirst)
       .slice(0, INBOX_PAGE);
     return {
       mentions,
-      blockedTickets: items.filter((t) => (t.blocked ?? "") !== "").sort(newestFirst),
+      blockedTickets: items
+        .filter((t) => (t.blocked ?? "") !== "")
+        .map((t) => {
+          const inboxKey = `blocked/${t.ticketId}`;
+          return { ...t, inboxKey, inboxRead: read(inboxKey) };
+        })
+        .filter((t) => live(t.inboxKey))
+        .sort(newestFirst),
       doneTickets,
     };
   }
@@ -540,6 +566,108 @@ export class OrganizationService {
       mentions += (await this.channelActivity(org, file.channelId, userId)).mentionsMe;
     }
     return mentions;
+  }
+
+  /** Row keys this inbox accepts: the web's key shapes, nothing else. */
+  private requireInboxKeys(keys: unknown): string[] {
+    if (!Array.isArray(keys) || keys.length === 0 || keys.length > 200) {
+      throw badRequest("keys must be a non-empty list of at most 200 row keys.");
+    }
+    return keys.map((k) => {
+      if (typeof k !== "string" || !/^(mention|blocked|done)\/.+$/.test(k)) {
+        throw badRequest(`not an inbox row key: ${typeof k === "string" ? k.slice(0, 80) : typeof k}`);
+      }
+      return k;
+    });
+  }
+
+  private inboxRepo(): NonNullable<OrgDeps["inboxReads"]> {
+    const repo = this.deps.inboxReads;
+    if (repo === undefined) throw new HttpError(503, "inbox_state_unavailable", "Inbox state is unavailable.");
+    return repo;
+  }
+
+  /** Marks rows read/unread for the calling user. */
+  async markInboxRead(
+    projectId: string,
+    orgId: string,
+    userId: string,
+    req: OrgInboxReadRequest,
+  ): Promise<{ updated: number }> {
+    const org = await this.requireOrg(projectId, orgId);
+    void org;
+    const keys = this.requireInboxKeys(req.keys);
+    this.inboxRepo().setRead(userId, projectId, orgId, keys, req.read, new Date(this.now()).toISOString());
+    return { updated: keys.length };
+  }
+
+  /** Archives/unarchives rows; archiving a mention stores the snapshot the client sends. */
+  async markInboxArchived(
+    projectId: string,
+    orgId: string,
+    userId: string,
+    req: OrgInboxArchiveRequest,
+  ): Promise<{ updated: number }> {
+    const org = await this.requireOrg(projectId, orgId);
+    void org;
+    const keys = this.requireInboxKeys(req.keys);
+    const rows = keys.map((key) => {
+      const snapshot = req.snapshots?.[key];
+      if (snapshot !== undefined) {
+        const id = typeof snapshot === "object" && snapshot !== null ? (snapshot as { id?: unknown }).id : undefined;
+        if (id !== key.slice(key.indexOf("/") + 1)) {
+          throw badRequest(`snapshot id does not match its key: ${key.slice(0, 80)}`);
+        }
+      }
+      return { key, ...(snapshot !== undefined ? { snapshot: JSON.stringify(snapshot) } : {}) };
+    });
+    this.inboxRepo().setArchived(
+      userId,
+      projectId,
+      orgId,
+      rows,
+      req.archived,
+      new Date(this.now()).toISOString(),
+    );
+    return { updated: keys.length };
+  }
+
+  /** The user's archived rows: mentions from snapshots, tickets resolved live (gone tickets drop out). */
+  async archivedInbox(projectId: string, orgId: string, userId: string): Promise<OrgInbox> {
+    const org = await this.requireOrg(projectId, orgId);
+    const repo = this.deps.inboxReads;
+    if (repo === undefined) return { mentions: [], blockedTickets: [], doneTickets: [] };
+    const states = repo.states(userId, projectId, orgId);
+    const rows = repo.archived(userId, projectId, orgId, 100);
+    const { tickets } = await listTickets(this.deps, org);
+    const spend = await computeSpend(this.deps, org, tickets);
+    const items = new Map(this.ticketItems(tickets, spend).map((i) => [i.ticketId, i]));
+    const mentions: OrgInbox["mentions"] = [];
+    const blockedTickets: OrgInbox["blockedTickets"] = [];
+    const doneTickets: OrgInbox["doneTickets"] = [];
+    for (const row of rows) {
+      const read = states.get(row.rowKey)?.read === true;
+      if (row.rowKey.startsWith("mention/")) {
+        if (row.snapshot === null) continue;
+        try {
+          const msg = JSON.parse(row.snapshot) as OrgChannelMessage;
+          if (typeof msg.id !== "string" || typeof msg.text !== "string") continue;
+          mentions.push({ ...msg, inboxKey: row.rowKey, inboxRead: read });
+        } catch {
+          continue;
+        }
+      } else {
+        const ticketId = row.rowKey.slice(row.rowKey.indexOf("/") + 1);
+        const item = items.get(ticketId);
+        if (item === undefined) continue;
+        if (row.rowKey.startsWith("blocked/")) {
+          blockedTickets.push({ ...item, inboxKey: row.rowKey, inboxRead: read });
+        } else if (row.rowKey.startsWith("done/")) {
+          doneTickets.push({ ...item, inboxKey: row.rowKey, inboxRead: read });
+        }
+      }
+    }
+    return { mentions, blockedTickets, doneTickets };
   }
 
   private alerts(org: LoadedOrg, period: string): OrganizationDetail["alerts"] {
@@ -806,6 +934,7 @@ export class OrganizationService {
         ...(workspace !== null ? { resolvedWorkspace: workspace } : {}),
         ...(e.budget !== undefined ? { budget: e.budget } : {}),
         ...(e.model !== undefined ? { model: e.model } : {}),
+        ...(e.machine !== undefined ? { machine: e.machine } : {}),
         state: paused.has(e.agentId)
           ? "paused"
           : this.employeeRunning(org, e.agentId)
@@ -961,6 +1090,8 @@ export class OrganizationService {
         workspace,
         ...(req.budget !== undefined ? { budget: req.budget } : {}),
         ...(req.model !== undefined ? { model: req.model } : {}),
+        // "local" reads the same as omitting it, so only anything else is stored.
+        ...(req.machine !== undefined && req.machine !== "local" ? { machine: req.machine } : {}),
       };
       await this.writeChart(org, [...org.chart.employees, employee]);
       await appendChannelMessage(
@@ -1061,6 +1192,12 @@ export class OrganizationService {
       else if (req.budget !== undefined) next.budget = req.budget;
       if (req.model === null) delete next.model;
       else if (req.model !== undefined) next.model = req.model;
+      // null, "" and "local" all unpin: the chart only ever stores a remote id.
+      if (req.machine === null || req.machine?.trim() === "" || req.machine === "local") {
+        delete next.machine;
+      } else if (req.machine !== undefined) {
+        next.machine = req.machine;
+      }
       if (req.name === null || req.name?.trim() === "") delete next.name;
       else if (req.name !== undefined) {
         const problem = employeeNameProblem(req.name);
@@ -1489,10 +1626,19 @@ export class OrganizationService {
    * `owner`: the one principal responsible for the ticket. A bare Agent id or `agent:<id>`
    * has to be an employee and `user:<id>` a Project member — a ticket owned by somebody the
    * organization does not have is a ticket nobody can be notified about, and nobody can start
-   * a session for.
+   * a session for. A `squad:<id>` names a live squad instead, and wakes its leader (see the
+   * assignment hooks in `updateTicket`/`moveTicket`).
    */
-  private requireOwner(org: LoadedOrg, raw: string): string {
+  private async requireOwner(org: LoadedOrg, raw: string): Promise<string> {
     const value = raw.trim();
+    const squadId = principalSquadId(value);
+    if (squadId !== null) {
+      const squads = await this.readSquadsOrThrow(org);
+      const squad = squads[squadId];
+      if (squad === undefined) throw badRequest(`unknown squad of ${org.orgId}: ${squadId}`);
+      if (squad.archived) throw badRequest(`squad is archived: ${squadId}`);
+      return squadPrincipal(squadId);
+    }
     const parsed = parsePrincipal(value);
     if (parsed === null && org.byId.has(value)) return agentPrincipal(value);
     if (parsed?.kind === "agent" && org.byId.has(parsed.id)) return agentPrincipal(parsed.id);
@@ -1627,7 +1773,7 @@ export class OrganizationService {
       if (title === "") throw badRequest("title must not be empty.");
       const by = this.actorPrincipal(org, actor);
       const owner =
-        req.owner !== undefined && req.owner.trim() !== "" ? this.requireOwner(org, req.owner) : by;
+        req.owner !== undefined && req.owner.trim() !== "" ? await this.requireOwner(org, req.owner) : by;
       // The model ask that names an untitled-in-English ticket runs under the organization's
       // lock: filing a ticket is rare, and a slug settled outside it could collide with one
       // filed meanwhile.
@@ -1688,6 +1834,264 @@ export class OrganizationService {
     return this.ticket(projectId, orgId, ticketId);
   }
 
+  // ---- squads ----
+
+  private async readSquadsOrThrow(org: LoadedOrg): Promise<Squads> {
+    const file = await this.deps.store.readSquads(org.dir);
+    if (!file.parsed.ok) {
+      throw new HttpError(409, "org_invalid", `Organization ${org.orgId} needs repair: squads.toml: ${file.parsed.error}`);
+    }
+    return file.parsed.value;
+  }
+
+  /** Squads of the organization, archived last (pickers filter them; history keeps pointing). */
+  async listSquads(projectId: string, orgId: string): Promise<OrgSquad[]> {
+    const org = await this.requireValidOrg(projectId, orgId);
+    const squads = await this.readSquadsOrThrow(org);
+    return Object.values(squads)
+      .sort((a, b) => Number(a.archived) - Number(b.archived) || a.id.localeCompare(b.id))
+      .map(squadToDto);
+  }
+
+  async squad(projectId: string, orgId: string, squadId: string): Promise<OrgSquad> {
+    const org = await this.requireValidOrg(projectId, orgId);
+    const squads = await this.readSquadsOrThrow(org);
+    const doc = squads[squadId];
+    if (doc === undefined) throw new HttpError(404, "squad_not_found", `Squad does not exist: ${squadId}`);
+    return squadToDto(doc);
+  }
+
+  async createSquad(
+    projectId: string,
+    orgId: string,
+    req: OrgSquadCreateRequest,
+  ): Promise<OrgSquad> {
+    return this.scheduler.withLock(projectId, orgId, async () => {
+      const org = await this.requireValidOrg(projectId, orgId);
+      const squads = await this.readSquadsOrThrow(org);
+      const id = req.id.trim();
+      if (!SEMANTIC_ID_PATTERN.test(id)) {
+        throw badRequest(`squad id must match ${SEMANTIC_ID_PATTERN}: ${req.id}`);
+      }
+      if (squads[id] !== undefined) throw badRequest(`squad already exists: ${id}`);
+      if (req.name.trim() === "") throw badRequest("squad name must not be empty.");
+      const leader = this.requireSquadLeader(org, req.leader);
+      const members = [leader];
+      for (const m of req.members ?? []) {
+        const p = this.requireSquadMember(org, m);
+        if (!members.includes(p)) members.push(p);
+      }
+      const doc: SquadDoc = {
+        id,
+        name: req.name.trim(),
+        leader,
+        members,
+        roles: this.requireSquadRoles(members, req.roles ?? {}),
+        instructions: (req.instructions ?? "").trim(),
+        archived: false,
+      };
+      squads[id] = doc;
+      await this.deps.store.writeSquads(org.dir, squads);
+      this.deps.notifyProject(projectId, { type: "org_squad", projectId, orgId, squadId: id, change: "created" });
+      return squadToDto(doc);
+    });
+  }
+
+  async updateSquad(
+    projectId: string,
+    orgId: string,
+    squadId: string,
+    req: OrgSquadUpdateRequest,
+  ): Promise<OrgSquad> {
+    return this.scheduler.withLock(projectId, orgId, async () => {
+      const org = await this.requireValidOrg(projectId, orgId);
+      const squads = await this.readSquadsOrThrow(org);
+      const doc = squads[squadId];
+      if (doc === undefined) throw new HttpError(404, "squad_not_found", `Squad does not exist: ${squadId}`);
+      if (doc.archived) throw badRequest(`squad is archived: ${squadId}`);
+      if (req.name !== undefined) {
+        if (req.name.trim() === "") throw badRequest("squad name must not be empty.");
+        doc.name = req.name.trim();
+      }
+      if (req.leader !== undefined) doc.leader = this.requireSquadLeader(org, req.leader);
+      if (req.members !== undefined) {
+        const members = req.members.map((m) => this.requireSquadMember(org, m));
+        if (!members.includes(doc.leader)) {
+          throw badRequest("the leader cannot be removed directly — designate another leader first.");
+        }
+        doc.members = [...new Set(members)];
+      } else if (!doc.members.includes(doc.leader)) {
+        // A new leader joins automatically, even when the member list was untouched.
+        doc.members = [...doc.members, doc.leader];
+      }
+      if (req.roles !== undefined) doc.roles = this.requireSquadRoles(doc.members, req.roles);
+      else {
+        // Roles for departed members leave with them.
+        for (const key of Object.keys(doc.roles)) {
+          if (!doc.members.includes(key)) delete doc.roles[key];
+        }
+      }
+      if (req.instructions !== undefined) doc.instructions = req.instructions.trim();
+      await this.deps.store.writeSquads(org.dir, squads);
+      this.deps.notifyProject(projectId, { type: "org_squad", projectId, orgId, squadId, change: "updated" });
+      return squadToDto(doc);
+    });
+  }
+
+  /**
+   * Archives a squad, irreversibly: it leaves every picker, and the tickets it still owns
+   * transfer to the former leader (each with its own `assigned` history entry, so the move
+   * reads as what it was). Archiving twice is a no-op returning the squad as it stands.
+   */
+  async archiveSquad(projectId: string, orgId: string, squadId: string, actor: Actor): Promise<OrgSquad> {
+    return this.scheduler.withLock(projectId, orgId, async () => {
+      const org = await this.requireValidOrg(projectId, orgId);
+      const squads = await this.readSquadsOrThrow(org);
+      const doc = squads[squadId];
+      if (doc === undefined) throw new HttpError(404, "squad_not_found", `Squad does not exist: ${squadId}`);
+      if (!doc.archived) {
+        doc.archived = true;
+        await this.deps.store.writeSquads(org.dir, squads);
+        const by = this.actorPrincipal(org, actor);
+        for (const f of await this.deps.store.listTickets(org.dir)) {
+          if (!f.parsed.ok || f.parsed.value.owner !== squadPrincipal(squadId)) continue;
+          const d = f.parsed.value;
+          d.owner = doc.leader;
+          this.recordHistory(d, by, "assigned", `${doc.leader} (squad ${squadId} archived)`);
+          await this.deps.store.writeTicket(org.dir, f.ticketId, f.column, d);
+          this.deps.notifyProject(projectId, { type: "org_ticket", projectId, orgId, ticketId: f.ticketId, change: "updated" });
+        }
+        this.deps.notifyProject(projectId, { type: "org_squad", projectId, orgId, squadId, change: "archived" });
+      }
+      return squadToDto(doc);
+    });
+  }
+
+  /** A squad's leader: an `agent:<id>` (or bare id) naming an employee. */
+  private requireSquadLeader(org: LoadedOrg, raw: string): string {
+    const value = raw.trim();
+    const parsed = parsePrincipal(value);
+    const id = parsed?.kind === "agent" ? parsed.id : org.byId.has(value) ? value : null;
+    if (id === null || !org.byId.has(id)) {
+      throw badRequest(`squad leader must be an employee of ${org.orgId} (an Agent id or agent:<id>): ${raw}`);
+    }
+    return agentPrincipal(id);
+  }
+
+  /** A squad member: an employee's `agent:<id>` (or bare id) or a Project member's `user:<id>`. */
+  private requireSquadMember(org: LoadedOrg, raw: string): string {
+    const value = raw.trim();
+    const parsed = parsePrincipal(value);
+    if (parsed === null && org.byId.has(value)) return agentPrincipal(value);
+    if (parsed?.kind === "agent" && org.byId.has(parsed.id)) return agentPrincipal(parsed.id);
+    if (parsed?.kind === "user" && this.projectUserIds(org).includes(parsed.id)) {
+      return userPrincipal(parsed.id);
+    }
+    throw badRequest(
+      `squad member must be an employee of ${org.orgId} or a member of this Project: ${raw}`,
+    );
+  }
+
+  /** Role map keys must name members in force — a role for nobody is a typo. */
+  private requireSquadRoles(members: string[], roles: Record<string, unknown>): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const [key, role] of Object.entries(roles)) {
+      if (typeof role !== "string") throw badRequest(`role for ${key} must be a string.`);
+      if (!members.includes(key.trim())) throw badRequest(`role names someone outside the squad: ${key}`);
+      if (role.trim() !== "") out[key.trim()] = role.trim();
+    }
+    return out;
+  }
+
+  /**
+   * Wakes a squad's leader with the dispatch protocol after an assignment (or a move out of
+   * `proposed`). Fire-and-record: a leader that cannot be woken is an error record inside
+   * the dispatch, never a failed write — the assignment already stands.
+   */
+  private async dispatchSquadLeader(
+    org: LoadedOrg,
+    ticketId: string,
+    doc: TicketDoc,
+    squad: SquadDoc,
+  ): Promise<void> {
+    const leaderId = principalAgentId(squad.leader);
+    if (leaderId === null || !org.byId.has(leaderId)) return;
+    try {
+      await dispatchToDesk(
+        this.deps,
+        org,
+        leaderId,
+        { kind: "ticket_work", ticket: ticketId },
+        squadDispatchBody(squad, org, ticketId, doc),
+        { hop: 0 },
+      );
+    } catch (err) {
+      this.deps.errors.record({
+        source: "organization",
+        err,
+        code: "org_squad_dispatch_failed",
+        ctx: { projectId: org.projectId, agentId: leaderId },
+      });
+    }
+  }
+
+  /** Post-write half of the assignment hooks: re-reads squad and ticket fresh, then dispatches. */
+  private async dispatchSquadForTicket(
+    projectId: string,
+    orgId: string,
+    ticketId: string,
+    squadId: string,
+  ): Promise<void> {
+    const org = await this.requireValidOrg(projectId, orgId);
+    const squad = (await this.readSquadsOrThrow(org))[squadId];
+    if (squad === undefined || squad.archived) return;
+    const t = await this.requireTicket(org, ticketId);
+    if (t.doc.owner !== squadPrincipal(squadId)) return;
+    await this.dispatchSquadLeader(org, ticketId, t.doc, squad);
+  }
+
+  /**
+   * Wakes the leader with one update (a progress note, a filed message): re-reads squad
+   * and ticket fresh, skips when the leader already has a live run (dedup: at most one
+   * outstanding re-trigger), stays silent when the ticket left the squad meanwhile — and
+   * never loops the leader's own words back at them.
+   */
+  private async wakeSquadLeaderForUpdate(
+    projectId: string,
+    orgId: string,
+    ticketId: string,
+    squadId: string,
+    sender: string,
+    text: string,
+  ): Promise<void> {
+    const org = await this.requireValidOrg(projectId, orgId);
+    const squad = (await this.readSquadsOrThrow(org))[squadId];
+    if (squad === undefined || squad.archived) return;
+    if (sender === squad.leader) return;
+    const t = await this.requireTicket(org, ticketId);
+    if (t.doc.owner !== squadPrincipal(squadId)) return;
+    const leaderId = principalAgentId(squad.leader);
+    if (leaderId === null || !org.byId.has(leaderId)) return;
+    if (squadLeaderBusy(this.deps, org, leaderId)) return;
+    try {
+      await dispatchToDesk(
+        this.deps,
+        org,
+        leaderId,
+        { kind: "ticket_work", ticket: ticketId },
+        squadRetriggerBody(squad, org, ticketId, t.doc, sender, text),
+        { hop: 0 },
+      );
+    } catch (err) {
+      this.deps.errors.record({
+        source: "organization",
+        err,
+        code: "org_squad_dispatch_failed",
+        ctx: { projectId: org.projectId, agentId: leaderId },
+      });
+    }
+  }
+
   async updateTicket(
     projectId: string,
     orgId: string,
@@ -1695,6 +2099,9 @@ export class OrganizationService {
     req: OrgTicketUpdateRequest,
     actor: Actor,
   ): Promise<OrgTicketDetail> {
+    // A squad assignment that must wake the leader: captured in the lock, dispatched after
+    // the reconcile — starting a session run under the org lock would hold every org write.
+    let squadDispatch: string | null = null;
     await this.scheduler.withLock(projectId, orgId, async () => {
       const org = await this.requireValidOrg(projectId, orgId);
       const t = await this.requireTicket(org, ticketId);
@@ -1709,7 +2116,7 @@ export class OrganizationService {
       }
       let assigned: string | null = null;
       if (req.owner !== undefined && req.owner.trim() !== "") {
-        const owner = this.requireOwner(org, req.owner);
+        const owner = await this.requireOwner(org, req.owner);
         if (owner !== d.owner) assigned = owner;
         d.owner = owner;
       }
@@ -1763,6 +2170,10 @@ export class OrganizationService {
       const booked = this.bookSession(org, actor, d);
       await this.deps.store.writeTicket(org.dir, ticketId, t.column, d);
       this.cacheBookedSession(org, ticketId, booked);
+      // A squad assignment on a working ticket wakes the leader (a `proposed` ticket is
+      // parked — the move out carries the dispatch instead).
+      const squadId = assigned === null ? null : principalSquadId(assigned);
+      if (squadId !== null && t.column !== "proposed") squadDispatch = squadId;
       this.deps.notifyProject(projectId, {
         type: "org_ticket",
         projectId,
@@ -1772,6 +2183,7 @@ export class OrganizationService {
       });
     });
     await this.scheduler.reconcile(projectId, orgId);
+    if (squadDispatch !== null) await this.dispatchSquadForTicket(projectId, orgId, ticketId, squadDispatch);
     return this.ticket(projectId, orgId, ticketId);
   }
 
@@ -1783,6 +2195,9 @@ export class OrganizationService {
     reason: string | undefined,
     actor: Actor,
   ): Promise<OrgTicketDetail> {
+    // A squad-owned ticket leaving `proposed` wakes the leader — the assignment landed
+    // while parked, so the move carries the dispatch. Captured in the lock, run after.
+    let squadDispatch: string | null = null;
     await this.scheduler.withLock(projectId, orgId, async () => {
       const org = await this.requireValidOrg(projectId, orgId);
       if (!isTicketColumn(status)) throw badRequest("status must be a board column.");
@@ -1803,8 +2218,13 @@ export class OrganizationService {
       const booked = status === "review" ? this.bookSession(org, actor, d) : null;
       await this.deps.store.moveTicket(org.dir, ticketId, from, status, d);
       this.cacheBookedSession(org, ticketId, booked);
+      if (from === "proposed" && status !== "proposed") {
+        const squadId = principalSquadId(d.owner);
+        if (squadId !== null) squadDispatch = squadId;
+      }
     });
     await this.scheduler.reconcile(projectId, orgId);
+    if (squadDispatch !== null) await this.dispatchSquadForTicket(projectId, orgId, ticketId, squadDispatch);
     return this.ticket(projectId, orgId, ticketId);
   }
 
@@ -1879,17 +2299,23 @@ export class OrganizationService {
     text: string,
     actor: Actor,
   ): Promise<OrgTicketDetail> {
-    await this.scheduler.withLock(projectId, orgId, async () => {
+    // A progress note on a squad-owned working ticket wakes the leader — the lock hands
+    // the capture out (never start a run under the org lock), the dispatch runs after it.
+    const retrigger = await this.scheduler.withLock(projectId, orgId, async () => {
       const org = await this.requireValidOrg(projectId, orgId);
       const t = await this.requireTicket(org, ticketId);
       const sentence = text.replace(/\s*\n\s*/g, " ").trim();
       if (sentence === "") throw badRequest("text must not be empty.");
       // The section is prose: the sentence alone, with who wrote it and when in the history.
       t.doc.progress = [...t.doc.progress, sentence];
-      this.recordHistory(t.doc, this.actorPrincipal(org, actor), "progress", historyNote(sentence));
+      const by = this.actorPrincipal(org, actor);
+      this.recordHistory(t.doc, by, "progress", historyNote(sentence));
       const booked = this.bookSession(org, actor, t.doc);
       await this.deps.store.writeTicket(org.dir, ticketId, t.column, t.doc);
       this.cacheBookedSession(org, ticketId, booked);
+      const squadId = principalSquadId(t.doc.owner);
+      const captured =
+        squadId !== null && t.column !== "proposed" ? { squadId, sender: by, sentence } : null;
       this.deps.notifyProject(projectId, {
         type: "org_ticket",
         projectId,
@@ -1897,7 +2323,18 @@ export class OrganizationService {
         ticketId,
         change: "progress",
       });
+      return captured;
     });
+    if (retrigger !== null) {
+      await this.wakeSquadLeaderForUpdate(
+        projectId,
+        orgId,
+        ticketId,
+        retrigger.squadId,
+        retrigger.sender,
+        retrigger.sentence,
+      );
+    }
     return this.ticket(projectId, orgId, ticketId);
   }
 
@@ -2435,38 +2872,36 @@ export class OrganizationService {
   }
 
   /**
-   * Whom a message addresses (organization/names.ts): an employee by id or by name, a Project
-   * member by user id, `all` — an id before a name, an employee before a member of the same
-   * id — and the explicit `@agent:<id>` / `@user:<id>` for a writer who has to say which.
+   * Whom a message addresses (organization/names.ts): only the exact markdown forms
+   * `[@Label](mention://agent|user|squad/<id>)` and `[@All](mention://all)` — a bare
+   * `@name`, `@id`, `@all` or `@agent:<id>` in prose pages nobody. The kind/id pair
+   * still validates against the live organization (a squad mention resolves only while
+   * the squad is live); the label is display only.
    */
-  private async resolveMentions(org: LoadedOrg, text: string): Promise<string[]> {
+  private async resolveMentions(
+    org: LoadedOrg,
+    text: string,
+  ): Promise<{ mentions: string[]; squads: Squads }> {
     const users = new Set(this.projectUserIds(org));
-    const names = await orgEmployeeNames(this.deps, org);
-    // Listed in order of precedence: of two handles of one length, the first one wins.
-    const handles: MentionHandle[] = [
-      { handle: "all", principal: "all" },
-      ...org.chart.employees.map((e) => ({
-        handle: e.agentId,
-        principal: agentPrincipal(e.agentId),
-      })),
-      ...org.chart.employees.map((e) => ({
-        handle: names.get(e.agentId) ?? e.agentId,
-        principal: agentPrincipal(e.agentId),
-      })),
-      ...[...users].map((id) => ({ handle: id, principal: userPrincipal(id) })),
-    ];
+    const squadsFile = await this.deps.store.readSquads(org.dir);
+    const squads = squadsFile.parsed.ok ? squadsFile.parsed.value : {};
     const out: string[] = [];
-    const found = findMentions(text, handles, (kind, id) =>
-      kind === "agent"
+    const found = findMentions(text, (kind, id) => {
+      if (kind === "squad") {
+        const squad = squads[id];
+        // Only a live squad is mentionable; archived or unknown reads as text.
+        return squad !== undefined && !squad.archived ? squadPrincipal(id) : null;
+      }
+      return kind === "agent"
         ? org.byId.has(id)
           ? agentPrincipal(id)
           : null
         : users.has(id)
           ? userPrincipal(id)
-          : null,
-    );
+          : null;
+    });
     for (const { principal } of found) if (!out.includes(principal)) out.push(principal);
-    return out;
+    return { mentions: out, squads };
   }
 
   async sendChannelMessage(
@@ -2476,7 +2911,9 @@ export class OrganizationService {
     channelId: string,
     req: OrgChannelMessageSendRequest,
   ): Promise<OrgChannelMessage> {
-    const msg = await this.scheduler.withLock(projectId, orgId, async () => {
+    // A squad re-trigger captured in the lock, dispatched after the reconcile (same rule
+    // as ticket assignment: never start a run under the org lock).
+    const boxed = await this.scheduler.withLock(projectId, orgId, async () => {
       const org = await this.requireOrg(projectId, orgId);
       const text = req.text.trim();
       if (text === "") throw badRequest("text must not be empty.");
@@ -2499,9 +2936,17 @@ export class OrganizationService {
       }
       const members = this.channelMemberPrincipals(org, cfg);
       if (!members.includes(sender)) throw notAMember(channelId, sender);
-      const mentions = await this.resolveMentions(org, text);
-      // `@all` is the channel's own membership, so only named principals can be outsiders.
-      const outsiders = mentions.filter((m) => m !== "all" && !members.includes(m));
+      const { mentions, squads } = await this.resolveMentions(org, text);
+      // `@all` is the channel's own membership, so only named principals can be outsiders —
+      // and a squad is covered by its leader: mentioning a squad whose leader sits in this
+      // channel is mentioning someone in it.
+      const outsiders = mentions.filter((m) => {
+        if (m === "all" || members.includes(m)) return false;
+        const squadId = principalSquadId(m);
+        if (squadId === null) return true;
+        const leader = squads[squadId]?.leader;
+        return leader === undefined || !members.includes(leader);
+      });
       if (outsiders.length > 0) {
         throw new HttpError(
           400,
@@ -2510,16 +2955,43 @@ export class OrganizationService {
         );
       }
       const refs = req.refs;
-      return appendChannelMessage(this.deps, org, channelId, {
+      const posted = await appendChannelMessage(this.deps, org, channelId, {
         sender,
         hop,
         text,
         mentions,
         ...(refs !== undefined && Object.keys(refs).length > 0 ? { refs } : {}),
       });
+      // Squad re-trigger watch: a message filed under a squad-owned ticket, with no
+      // explicit @ and not from the leader, wakes the leader with the update (an @'d
+      // message is already routed by the mention sweep; the leader's own never loops).
+      const ticketRef = refs?.ticket;
+      let retrigger: { ticketId: string; squadId: string; text: string; sender: string } | null =
+        null;
+      if (ticketRef !== undefined && mentions.length === 0) {
+        const ticket = await this.deps.store.findTicket(org.dir, ticketRef);
+        if (ticket !== null && ticket.parsed.ok) {
+          const squadId = principalSquadId(ticket.parsed.value.owner);
+          const squad = squadId === null ? undefined : squads[squadId];
+          if (
+            squadId !== null &&
+            squad !== undefined &&
+            !squad.archived &&
+            sender !== squad.leader &&
+            ticket.parsed.value.status !== "proposed"
+          ) {
+            retrigger = { ticketId: ticketRef, squadId, text, sender };
+          }
+        }
+      }
+      return { posted, retrigger };
     });
     await this.scheduler.reconcile(projectId, orgId);
-    return msg;
+    if (boxed.retrigger !== null) {
+      const r = boxed.retrigger;
+      await this.wakeSquadLeaderForUpdate(projectId, orgId, r.ticketId, r.squadId, r.sender, r.text);
+    }
+    return boxed.posted;
   }
 
   async markRead(
@@ -2639,6 +3111,125 @@ export class OrganizationService {
   }
 }
 
+function squadToDto(doc: SquadDoc): OrgSquad {
+  return {
+    id: doc.id,
+    name: doc.name,
+    leader: doc.leader,
+    members: [...doc.members],
+    roles: { ...doc.roles },
+    instructions: doc.instructions,
+    archived: doc.archived,
+  };
+}
+
+/**
+ * Whether the leader already has a live run on its desk: the re-trigger dedup (at most
+ * one outstanding wake — a second update while the first is still running waits for it).
+ * No desk yet counts as free; a status that cannot be read counts as busy.
+ */
+function squadLeaderBusy(deps: OrgDeps, org: LoadedOrg, leaderId: string): boolean {
+  const desk = org.desks[leaderId];
+  if (desk === undefined) return false;
+  try {
+    return deps.runner.statusOf(desk.sessionId) !== "idle";
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * The leader's dispatch: the operating protocol (system-managed, not editable), the roster
+ * with the exact @-mention to paste per member, the squad's own instructions, and the
+ * ticket. Written in the organization's language, like every trigger body.
+ */
+export function squadDispatchBody(
+  squad: SquadDoc,
+  org: LoadedOrg,
+  ticketId: string,
+  doc: TicketDoc,
+): string {
+  const zh = orgLanguage(org.config) === "zh";
+  const displayName = (principal: string): string => {
+    const agentId = principalAgentId(principal);
+    if (agentId !== null) return org.byId.get(agentId)?.name ?? agentId;
+    return principal.startsWith("user:") ? principal.slice("user:".length) : principal;
+  };
+  // The exact mention to paste per member: markdown, since bare @text never triggers.
+  // Labels stay link-safe (names may hold spaces and any script, but not brackets).
+  const mentionOf = (principal: string): string => {
+    const label = displayName(principal).replace(/[\[\]]/g, "").trim() || principal;
+    const agentId = principalAgentId(principal);
+    if (agentId !== null) return `[@${label}](mention://agent/${agentId})`;
+    if (principal.startsWith("user:")) return `[@${label}](mention://user/${principal.slice("user:".length)})`;
+    return principal;
+  };
+  const roster = squad.members.map((m) => {
+    const role = squad.roles[m];
+    const who = `${displayName(m)} (${mentionOf(m)})`;
+    return role !== undefined ? `- ${who}：${role}` : `- ${who}`;
+  });
+  const ticket = [
+    `${ticketId}「${doc.title}」`,
+    doc.goal.trim() !== "" ? `${zh ? "目标" : "Goal"}：${doc.goal.trim()}` : "",
+    doc.acceptanceCriteria.trim() !== ""
+      ? `${zh ? "验收" : "Acceptance"}：${doc.acceptanceCriteria.trim()}`
+      : "",
+  ]
+    .filter((line) => line !== "")
+    .join("\n");
+  if (zh) {
+    return [
+      `工单 ${ticketId} 指派给了 squad「${squad.name}」，你是它的 leader。`,
+      "",
+      "Squad 协作协议（照做，不要发挥）：读工单，把下一步派给最合适的成员——在工单频道里发一条 @-mention 对方的消息（@ 写法照花名册括号里的链接一字不差地抄，方括号圆括号都要；纯文本 @ 不触发，人名裸写等于没 @）。正文只写下一步是什么，不要复述工单全文，对方看得见。派完即停，不要自己实现。父工单保持 in_progress；只有整体目标达成才移到 review；done 由人来关。",
+      "",
+      "花名册：",
+      ...roster,
+      ...(squad.instructions.trim() !== "" ? ["", "Squad 说明：", squad.instructions.trim()] : []),
+      "",
+      "工单：",
+      ticket,
+    ].join("\n");
+  }
+  return [
+    `Ticket ${ticketId} was assigned to squad "${squad.name}", and you are its leader.`,
+    "",
+    "Squad operating protocol (follow it, do not improvise): read the ticket, hand the next step to the best-suited member — post an @-mention of them in the ticket channel (copy the bracketed mention link from the roster exactly, brackets and parens included; a bare @handle in prose triggers nothing; say only what the next step is, never restate the ticket, they can read it). Stop after dispatching; do not implement it yourself. The parent stays in_progress; move it to review only once the overall goal is met; a human closes it to done.",
+    "",
+    "Roster:",
+    ...roster,
+    ...(squad.instructions.trim() !== "" ? ["", "Squad instructions:", squad.instructions.trim()] : []),
+    "",
+    "Ticket:",
+    ticket,
+  ].join("\n");
+}
+
+/**
+ * The leader's re-trigger: one update (a progress note, a filed message) with a short
+ * protocol pointer — not the full dispatch (the leader already holds the roster): read
+ * the update, delegate the next step by @-mention or stay silent, and only move the
+ * parent to review once the overall goal is met.
+ */
+export function squadRetriggerBody(
+  squad: SquadDoc,
+  org: LoadedOrg,
+  ticketId: string,
+  doc: TicketDoc,
+  sender: string,
+  text: string,
+): string {
+  const zh = orgLanguage(org.config) === "zh";
+  const head = zh
+    ? `squad「${squad.name}」的工单 ${ticketId}「${doc.title}」有新动态，${sender} 说：`
+    : `An update on squad "${squad.name}" ticket ${ticketId} "${doc.title}" from ${sender}:`;
+  const tail = zh
+    ? "读这条动态：需要下一步就按花名册的链接 @-mention 成员派下去（纯文本 @ 不触发），不需要就保持沉默；只有整体目标达成才把父工单移到 review。"
+    : "Read the update: @-mention a member to delegate the next step using the roster's bracketed link (a bare @handle triggers nothing), or stay silent; move the parent to review only once the overall goal is met.";
+  return [head, "", text.trim(), "", tail].join("\n");
+}
+
 // ---------------------------------------------------------------------------
 // Texts
 // ---------------------------------------------------------------------------
@@ -2738,6 +3329,8 @@ Your organization directory is \`<app_data_dir>/organizations/${input.orgId}/\`.
 /** The body of the CEO's initialization work run, in the organization's working language. */
 function initBody(org: LoadedOrg): string {
   const board = userPrincipal(org.config.createdBy);
+  // The exact mention to paste for the board: markdown, since bare @text never triggers.
+  const boardMd = `[@${org.config.createdBy}](mention://user/${org.config.createdBy})`;
   const ceo = ceoAgentId(org.orgId);
   if (orgLanguage(org.config) === "zh") {
     return [
@@ -2746,13 +3339,13 @@ function initBody(org: LoadedOrg): string {
       "如果上面的使命说的是「镜像一家现实公司」——为现实同事各建一个数字分身、公司只负责传话——就改按 `company-mirror` Skill 行事，跳过下面这份清单。如果使命是做科研——跑实验、给出结论、写论文——下面的清单照常适用，另按 `company-research` Skill 补两件事：至少招一名不审自己稿的专职审稿人；任何实验循环开始前，负责人都要先在全员频道向董事会申请到资源额度。",
       "",
       "你是一家全新组织的 CEO，这是它的初始化运行。重要的事由董事会拍板，你负责提案。凡是动到这台机器、要花钱或触及组织之外的事——重负载计算、付费服务、公共工作区之外的写入、不可逆操作、缺少的凭据——每名员工（包括你）都先在全员频道请示董事会再动手（`company-employee` 的「What you may not decide alone」一节）。按顺序完成下面几件事：",
-      `1. 读手册。然后在全员频道里给董事会（${board}）写一份提案——\`penguin org channel send -m "@${board} …"\`——写清你对使命的理解、打算开的工作线与首批工单、打算招募的角色（先人事与财务）及其预算——所有人都用组织的 Model，组织未指定时用 Project 的默认 Model，除非使命为某个角色另行指定，提案里不要提 Model——以及公共工作区怎么划分。以明确的问题结尾，然后结束本轮：董事会答复之前不招人、不排日程、不开工单。`,
+      `1. 读手册。然后在全员频道里给董事会（${board}）写一份提案——\`penguin org channel send -m "${boardMd} …"\`（提及必须用这种方括号精确格式，纯文本 @ 不触发）——写清你对使命的理解、打算开的工作线与首批工单、打算招募的角色（先人事与财务）及其预算——所有人都用组织的 Model，组织未指定时用 Project 的默认 Model，除非使命为某个角色另行指定，提案里不要提 Model——以及公共工作区怎么划分。以明确的问题结尾，然后结束本轮：董事会答复之前不招人、不排日程、不开工单。`,
       `2. 答复会以提及或本会话消息的形式到来。董事会确认后，先招人事与财务——\`penguin org hire --new-agent ${org.orgId}_hr --title HR --reports-to ${ceo} --duties "…"\`，\`${org.orgId}_finance\` 同理——再招确认过的其他角色。`,
       "3. 按确认的方案划分公共工作区。你自己在 `ceo/` 里工作，招募时不给 `--workspace` 的员工落在以其 Agent id 命名的子目录里，公共工作区的根目录只放大家共读的共享输入、不是任何人的工位。要换个分区名字再单独分配（`penguin org employee set <agent_id> --workspace <子目录>`）；相对子目录会在分配时自动建好。",
       "4. 把你自己、人事与财务排进日历（`penguin org calendar add …`），做成轮值表而不是广播：你每天 09:00，人事每三天 10:00，财务每周 16:00（组织时区，写成带偏移量的 ISO 时刻，绝不用 `--start-at now`），此后每招一人就给它一个各自不同的时点。",
       "5. 把确认过的工单开进 `proposed`（`penguin org ticket create …`）：一个项目级目标一张父工单，每条工作线一张子工单。接受一张工单进入 `in_progress` 时就指派负责人（`penguin org ticket assign <id> --owner agent:<员工>`）：那名员工的工位会在下一次巡检时接手并发起工单会话。只有工单的负责人可以为它发起会话，所以你只为自己名下的工单执行 `penguin org ticket start <id>`；工位只负责调度与跟踪，绝不在工位上做工单本身的活。",
       "6. 每条工作线开一个频道（`penguin org channel create ch_<工作线> --name …`）并邀请它的负责人（`penguin org channel invite ch_<工作线> agent:<agent_id>`），免得一条线索淹没全员频道。",
-      `7. 在全员频道里向董事会汇报并 @${board}，如果还需要拍板，就点明下一个决定。`,
+      `7. 在全员频道里向董事会汇报并 ${boardMd}，如果还需要拍板，就点明下一个决定。`,
     ].join("\n");
   }
   return [
@@ -2761,13 +3354,13 @@ function initBody(org: LoadedOrg): string {
     "If the mission above says the organization MIRRORS a real company — one digital twin per real colleague, a company that only relays between people — follow the `company-mirror` skill instead and skip the checklist below. If it is a research mission — experiments to run, results to claim, papers to write — the checklist applies and the `company-research` skill adds two things: at least one dedicated reviewer who authors nothing it reviews, and no experiment loop before its owner has an approved resource envelope from the board.",
     "",
     'You are the CEO of a brand-new organization and this is its initialization run. The board decides the important things; you propose. Whatever touches this machine, spends money or reaches outside the organization — heavy compute, paid services, writing outside the shared workspace, anything irreversible, a missing credential — every employee, you included, asks the board in the all-hands channel before it starts (`company-employee`, "What you may not decide alone"). Work through the following, in order:',
-    `1. Read the handbook. Then write ONE proposal to the board (${board}) in the all-hands channel — \`penguin org channel send -m "@${board} …"\` — with your reading of the mission, the streams and first tickets you intend to file, the roles you intend to hire (HR and finance first) with budgets — every one on the organization's model, or the Project's default model when the organization names none, unless the mission asked for a particular one on a role, so propose no models — and how you will split the shared workspace. End with the explicit question and END THIS RUN: hire nothing, schedule nothing and file nothing before the board answers.`,
+    `1. Read the handbook. Then write ONE proposal to the board (${board}) in the all-hands channel — \`penguin org channel send -m "${boardMd} …"\` (mentions use this exact bracket form; a bare @handle triggers nothing) — with your reading of the mission, the streams and first tickets you intend to file, the roles you intend to hire (HR and finance first) with budgets — every one on the organization's model, or the Project's default model when the organization names none, unless the mission asked for a particular one on a role, so propose no models — and how you will split the shared workspace. End with the explicit question and END THIS RUN: hire nothing, schedule nothing and file nothing before the board answers.`,
     `2. The answer arrives as a mention or in this conversation. Once the board confirms, hire HR and finance first — \`penguin org hire --new-agent ${org.orgId}_hr --title HR --reports-to ${ceo} --duties "…"\` and the same for \`${org.orgId}_finance\` — then the confirmed roles.`,
     "3. Partition the shared workspace as confirmed. You already work in `ceo/`, and a hire given no `--workspace` lands in a sub-directory named after its Agent id; the root of the shared workspace holds the shared inputs everyone reads and is nobody's desk. Assign a different sub-directory where a partition should be named for the stream rather than the employee (`penguin org employee set <agent_id> --workspace <sub-directory>`); a relative sub-directory is created when you assign it.",
     "4. Put yourself, HR and finance on the calendar (`penguin org calendar add …`) as a rota, not a broadcast: you daily at 09:00, HR every three days at 10:00, finance weekly at 16:00 (organization timezone, ISO instants with the offset — never `--start-at now`), and give every later hire its own distinct hour.",
     "5. File the confirmed tickets in `proposed` (`penguin org ticket create …`): one parent ticket for the project-level goal and children per stream. Assign an owner as you accept one into `in_progress` (`penguin org ticket assign <id> --owner agent:<employee>`): that employee's desk picks it up in its next sweep and starts the ticket session itself. Only a ticket's owner may start its sessions, so run `penguin org ticket start <id>` for the tickets you own yourself — the desk schedules and tracks, and never does the ticket work itself.",
     "6. Open one channel per stream (`penguin org channel create ch_<stream> --name …`) and invite its owner (`penguin org channel invite ch_<stream> agent:<agent_id>`), so a stream's thread does not drown the all-hands channel.",
-    `7. Report to the board in the all-hands channel, mentioning @${board}, and name the next decision you need, if any.`,
+    `7. Report to the board in the all-hands channel, mentioning it as ${boardMd}, and name the next decision you need, if any.`,
   ].join("\n");
 }
 
@@ -2845,6 +3438,14 @@ export abstract class OrgService extends Interface<
     | "progressTicket"
     | "startTicket"
     | "attachTicket"
+    | "listSquads"
+    | "squad"
+    | "createSquad"
+    | "updateSquad"
+    | "archiveSquad"
+    | "markInboxRead"
+    | "markInboxArchived"
+    | "archivedInbox"
     | "channels"
     | "channel"
     | "createChannel"
@@ -2896,6 +3497,7 @@ export class OrganizationModule {
   @Use() private readonly errors!: Errors;
   @Use() private readonly settings!: Settings;
   @Use() private readonly messagingRepo!: MessagingBindings;
+  @Use() private readonly db!: Db;
   @Provide() orgService!: OrgService;
   @Provide() orgScheduler!: OrgScheduler;
   setup({ effect }: ClassCtx) {
@@ -2912,6 +3514,7 @@ export class OrganizationModule {
       projects: this.projects,
       members: this.members,
       sessions: this.sessionsRepo,
+      inboxReads: new InboxReadsRepo(this.db as unknown as DatabaseSync),
       runner,
       sessionCreator: this.sessionCreator,
       agents: {

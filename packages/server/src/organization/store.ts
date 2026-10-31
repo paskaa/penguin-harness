@@ -15,6 +15,7 @@ import type {
   OrgChart,
   OrgConfig,
   ParseResult,
+  Squads,
   TicketDoc,
 } from "./files.js";
 import {
@@ -24,11 +25,13 @@ import {
   parseDesks,
   parseOrgChart,
   parseOrgConfig,
+  parseSquads,
   parseTicket,
   serializeChannelConfig,
   serializeDesks,
   serializeOrgChart,
   serializeOrgConfig,
+  serializeSquads,
   serializeTicket,
 } from "./files.js";
 import {
@@ -50,6 +53,7 @@ import {
   orgConfigPath,
   orgDir,
   organizationsDir,
+  squadsPath,
   ticketPath,
   ticketsDir,
   workspaceDir,
@@ -231,6 +235,18 @@ export class OrgStore {
 
   async writeDesks(dir: string, desks: Desks): Promise<void> {
     await writeText(desksPath(dir), serializeDesks(desks));
+  }
+
+  /** A missing squad file is no squads. */
+  async readSquads(dir: string): Promise<OrgFile<Squads>> {
+    const raw = await readText(squadsPath(dir));
+    return raw === null
+      ? { raw: "", parsed: { ok: true, value: {} } }
+      : { raw, parsed: parseSquads(raw) };
+  }
+
+  async writeSquads(dir: string, squads: Squads): Promise<void> {
+    await writeText(squadsPath(dir), serializeSquads(squads));
   }
 
   async readHandbook(dir: string): Promise<string> {

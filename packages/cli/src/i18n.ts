@@ -331,6 +331,7 @@ export interface Messages {
     addDesc: string;
     updateDesc: string;
     rmDesc: string;
+    runDesc: string;
     /** --prompt: the text the firing sends. */
     prompt: string;
     /** --start-at: first fire time, ISO 8601 — or the literal `now` for the current instant (a one-shot needs a future time, so `now` only suits a periodic task). */
@@ -354,6 +355,8 @@ export interface Messages {
     /** Confirmation after add/update; nextFireAt is absent for done/disabled/invalid tasks. */
     written(name: string, enabledText: string, nextFireAt: string | undefined): string;
     removed(name: string): string;
+    /** Confirmation after run; `session` is the short Session id, `queued` means it waits behind a busy target. */
+    fired(name: string, session: string, queued: boolean): string;
     enabled(): string;
     disabled(): string;
     /** Period column for a one-off task (no period configured). */
@@ -1466,10 +1469,11 @@ const en: Messages = {
     days: "Trailing window in days (sets --from/--to)",
     from: "Range start (yyyy-mm-dd); requires --to",
     to: "Range end (yyyy-mm-dd); requires --from",
-    by: "Group the table by: date, agent, model or session",
+    by: "Group the table by: date, agent, model, session or squad",
     rangeIncomplete: () => "--from and --to must be given together.",
     daysInvalid: (value) => `Invalid --days value "${value}": expected a positive integer.`,
-    byInvalid: (value) => `Invalid --by value "${value}": expected date, agent, model or session.`,
+    byInvalid: (value) =>
+      `Invalid --by value "${value}": expected date, agent, model, session or squad.`,
     today: () => "today",
     last7d: () => "last 7 days",
     total: () => "total",
@@ -1488,6 +1492,8 @@ const en: Messages = {
     updateDesc:
       "Update a scheduled task (read-modify-write: unspecified fields keep their stored values)",
     rmDesc: "Delete a scheduled task (no prompt; the server's owner authorization applies)",
+    runDesc:
+      "Fire a scheduled task once right now (an extra run; the schedule itself is untouched; queued when the target session is busy)",
     prompt: "The text each firing sends",
     startAt:
       "First fire time (ISO 8601), or the literal `now` for the current instant; a one-shot task needs a future time, so `now` only works with --period",
@@ -1504,6 +1510,10 @@ const en: Messages = {
     written: (name, enabledText, nextFireAt) =>
       `Schedule ${name} written (${enabledText}${nextFireAt !== undefined ? `, next fire ${nextFireAt}` : ""}).`,
     removed: (name) => `Schedule ${name} removed.`,
+    fired: (name, session, queued) =>
+      queued
+        ? `Schedule ${name} queued behind busy session ${session}; it fires once the session turns idle.`
+        : `Schedule ${name} fired into session ${session}.`,
     enabled: () => "on",
     disabled: () => "off",
     oneShot: () => "once",
@@ -1571,7 +1581,7 @@ const en: Messages = {
     channelUnarchiveDesc: "Unarchive a channel (people only)",
     channelTailDesc: "Print a channel's last messages of a day (20 unless -n is given)",
     channelSendDesc:
-      "Send a message to a channel (@agent:<id> / @all mention its members and trigger their desks)",
+      "Send a message to a channel (mention as [@Name](mention://agent|user|squad|all/<id>) to trigger desks; bare @text never triggers)",
     handbookDesc:
       "The organization handbook: the knowledge base under handbook/, whose README.md is the index every run reads first",
     handbookListDesc: "List the handbook files (path, size, updated), the index first",
@@ -1638,7 +1648,7 @@ const en: Messages = {
     channelPurpose: "What the channel is for",
     channelDate: "Day to read (yyyy-mm-dd in the organization's timezone; defaults to today)",
     channelCount: "Number of messages to print (default 20)",
-    channelText: "Message text (@agent:<id> or @all to mention, inside the channel's membership)",
+    channelText: "Message text (mention as [@Name](mention://kind/id), inside the channel's membership)",
     handbookPath:
       "Path relative to handbook/ (plain segments, e.g. decisions/2026-09-02-hire-plan.md)",
     handbookText: "Document text",
@@ -2600,10 +2610,10 @@ const zh: Messages = {
     days: "最近 n 天（自动换算为 --from/--to）",
     from: "起始日期（yyyy-mm-dd）；须与 --to 成对",
     to: "结束日期（yyyy-mm-dd）；须与 --from 成对",
-    by: "分组维度：date、agent、model 或 session",
+    by: "分组维度：date、agent、model、session 或 squad",
     rangeIncomplete: () => "--from 与 --to 必须成对给出。",
     daysInvalid: (value) => `--days 值「${value}」无效：应为正整数。`,
-    byInvalid: (value) => `--by 值「${value}」无效：应为 date、agent、model 或 session。`,
+    byInvalid: (value) => `--by 值「${value}」无效：应为 date、agent、model、session 或 squad。`,
     today: () => "今日",
     last7d: () => "近 7 天",
     total: () => "累计",
@@ -2620,6 +2630,7 @@ const zh: Messages = {
     addDesc: "创建定时任务（经 API 写入任务文件；缺省即启用——用 --disabled 关闭）",
     updateDesc: "更新定时任务（读改写：未指定的字段保留存储值）",
     rmDesc: "删除定时任务（不做确认；服务端的 owner 授权照旧生效）",
+    runDesc: "立即手工触发一次（额外跑一次，不动原时间表；目标会话忙则排队）",
     prompt: "每次触发要发送的内容",
     startAt:
       "首次触发时刻（ISO 8601），或字面量 `now` 表示当前时刻；一次性任务须用未来时刻，`now` 只适用于带 --period 的任务",
@@ -2636,6 +2647,10 @@ const zh: Messages = {
     written: (name, enabledText, nextFireAt) =>
       `定时任务 ${name} 已写入（${enabledText}${nextFireAt !== undefined ? `，下次触发 ${nextFireAt}` : ""}）。`,
     removed: (name) => `定时任务 ${name} 已删除。`,
+    fired: (name, session, queued) =>
+      queued
+        ? `定时任务 ${name} 已排队（会话 ${session} 正忙，空闲后发送）。`
+        : `定时任务 ${name} 已触发，会话 ${session}。`,
     enabled: () => "开",
     disabled: () => "关",
     oneShot: () => "一次性",
@@ -2693,7 +2708,7 @@ const zh: Messages = {
     channelArchiveDesc: "归档频道：在取消归档前只读（仅限人）",
     channelUnarchiveDesc: "取消频道的归档（仅限人）",
     channelTailDesc: "打印某个频道某一天的最后若干条消息（未给 -n 时 20 条）",
-    channelSendDesc: "向频道发送消息（@agent:<id> / @all 提及频道成员并触发其工位）",
+    channelSendDesc: "向频道发送消息（用 [@名](mention://agent|user|squad|all/<id>) 提及并触发工位；纯文本 @ 不触发）",
     handbookDesc: "组织手册：handbook/ 下的知识库，其 README.md 是每轮先读的索引",
     handbookListDesc: "列出手册文件（路径、大小、更新时间），索引在前",
     handbookShowDesc: "打印一份手册文档（不给路径时打印索引）",
@@ -2749,7 +2764,7 @@ const zh: Messages = {
     channelPurpose: "频道用途",
     channelDate: "要读的日期（组织时区的 yyyy-mm-dd；缺省今天）",
     channelCount: "打印的消息条数（缺省 20）",
-    channelText: "消息内容（@agent:<id> 或 @all 表示提及，只能提及频道内的成员）",
+    channelText: "消息内容（用 [@名](mention://kind/id) 提及，只能提及频道内的成员）",
     handbookPath: "相对 handbook/ 的路径（普通片段，如 decisions/2026-09-02-hire-plan.md）",
     handbookText: "文档内容",
     handbookFile: "从本地文件读取文档内容",

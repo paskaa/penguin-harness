@@ -34,6 +34,7 @@ import type {
   SessionForkResponse,
   SessionProcessesResponse,
   SessionResponse,
+  SessionRunsResponse,
   SessionsResponse,
   SessionsBatchResponse,
   SubagentMessageResponse,
@@ -654,6 +655,17 @@ export function sessionsBatchRoutes(deps: SessionsRouteDeps): Hono<AppEnv> {
 }
 
 /** Agent-level entry: /api/projects/:p/agents/:a/sessions. */
+//
+// Short-TTL response cache: the sidebar re-polls this list every few seconds and the
+// unpaged shape builds a SessionInfo per row (7500+ on a busy Agent) plus a multi-MB
+// JSON body each time. 3s staleness is invisible next to the poll cadence, and live
+// status still flows through SSE. Keyed by the FULL request shape + userId (org
+// visibility differs per viewer); concurrent identical requests share one in-flight
+// build (the web's double-fetch); bounded size.
+const SESSIONS_LIST_TTL = 15000;
+const sessionsListCache = new Map<string, { at: number; body: unknown }>();
+const sessionsListInFlight = new Map<string, Promise<unknown>>();
+
 export function agentSessionsRoutes(deps: SessionsRouteDeps): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
 
@@ -700,23 +712,75 @@ export function agentSessionsRoutes(deps: SessionsRouteDeps): Hono<AppEnv> {
     if (rawExcludeOrg !== undefined && rawExcludeOrg !== "1") {
       throw badRequest("excludeOrg only accepts 1.");
     }
-    const { sessions, counts, workspaceCounts, workspaceLatest, workspaceLatestActive } =
-      await deps.sessionService.listSessions(projectId, agentId, {
-        ...(paging ? { paging } : {}),
-        order,
-        ...(rawCategory !== undefined ? { category: rawCategory as SessionCategory } : {}),
-        ...(rawWorkspaceGroup !== undefined ? { workspaceGroup: rawWorkspaceGroup } : {}),
-        ...(rawCounts !== undefined ? { withCounts: true } : {}),
-        ...(rawExcludeOrg !== undefined ? { excludeOrg: true } : {}),
-        view: listingViewOfRequest(c),
-      });
-    return c.json({
-      sessions,
-      ...(counts ? { counts } : {}),
-      ...(workspaceCounts ? { workspaceCounts } : {}),
-      ...(workspaceLatest ? { workspaceLatest } : {}),
-      ...(workspaceLatestActive ? { workspaceLatestActive } : {}),
-    } satisfies SessionsResponse);
+    const cacheKey = [
+      c.var.user.userId,
+      projectId,
+      agentId,
+      order,
+      rawCategory ?? "",
+      rawWorkspaceGroup ?? "",
+      rawCounts ?? "",
+      rawExcludeOrg ?? "",
+      JSON.stringify(paging),
+      listingViewOfRequest(c),
+    ].join("::");
+    const buildList = () =>
+      deps.sessionService
+        .listSessions(projectId, agentId, {
+          ...(paging ? { paging } : {}),
+          order,
+          ...(rawCategory !== undefined ? { category: rawCategory as SessionCategory } : {}),
+          ...(rawWorkspaceGroup !== undefined ? { workspaceGroup: rawWorkspaceGroup } : {}),
+          ...(rawCounts !== undefined ? { withCounts: true } : {}),
+          ...(rawExcludeOrg !== undefined ? { excludeOrg: true } : {}),
+          view: listingViewOfRequest(c),
+        })
+        .then((out) => ({
+          sessions: out.sessions,
+          ...(out.counts ? { counts: out.counts } : {}),
+          ...(out.workspaceCounts ? { workspaceCounts: out.workspaceCounts } : {}),
+          ...(out.workspaceLatest ? { workspaceLatest: out.workspaceLatest } : {}),
+          ...(out.workspaceLatestActive ? { workspaceLatestActive: out.workspaceLatestActive } : {}),
+        }));
+    const refresh = (): Promise<unknown> => {
+      // one background rebuild at a time per shape; failures just leave the stale
+      // entry in place (the next request retries the refresh)
+      let p = sessionsListInFlight.get(cacheKey);
+      if (!p) {
+        p = buildList()
+          .then((body) => {
+            if (sessionsListCache.size > 300) sessionsListCache.clear();
+            sessionsListCache.set(cacheKey, { at: Date.now(), body });
+            // Warm the newest sessions' shards in the parse worker: the conversation open
+            // that follows this poll hits a warm cache instead of a cold parse.
+            void deps.traceService
+              .warmSessions(
+                body.sessions.slice(0, 8).map((s) => ({
+                  projectId,
+                  agentId,
+                  sessionId: s.sessionId,
+                })),
+              )
+              .catch(() => undefined);
+            return body;
+          })
+          .finally(() => {
+            sessionsListInFlight.delete(cacheKey);
+          });
+        sessionsListInFlight.set(cacheKey, p);
+      }
+      return p;
+    };
+    const hit = sessionsListCache.get(cacheKey);
+    if (hit) {
+      if (Date.now() - hit.at < SESSIONS_LIST_TTL) return c.json(hit.body);
+      // stale-while-revalidate: answer from the stale body NOW, rebuild in the
+      // background — a poll never waits for the multi-hundred-ms rebuild.
+      void refresh();
+      return c.json(hit.body);
+    }
+    const body = await refresh();
+    return c.json(body as SessionsResponse);
   });
 
   app.post("/", async (c) => {
@@ -815,6 +879,20 @@ export function sessionsRoutes(deps: SessionsRouteDeps): Hono<AppEnv> {
     return c.json({
       session: { ...info, ...(tracePath !== undefined ? { tracePath } : {}) },
     } satisfies SessionResponse);
+  });
+
+  // Recent runs, newest first: how each drive ended (completed | failed | aborted).
+  // The substrate run-based coordination reads; `limit` caps the lookback.
+  app.get("/:sessionId/runs", async (c) => {
+    const row = resolveSession(c);
+    const rawLimit = c.req.query("limit");
+    const limit =
+      rawLimit === undefined ? 20 : Number.parseInt(rawLimit, 10);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+      throw badRequest("limit must be an integer between 1 and 200.");
+    }
+    const runs = await deps.sessionService.sessionRuns(row, limit);
+    return c.json({ runs } satisfies SessionRunsResponse);
   });
 
   app.patch("/:sessionId", async (c) => {

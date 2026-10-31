@@ -74,7 +74,7 @@ describe("scenario: the DeepSeek Harness plugin Marketplace company", () => {
 
     // 2. The CEO (from its desk) confirms the mission with the board in the all-hands channel …
     const m1 = await service.sendChannelMessage(P, ORG, "alice", DEFAULT_CHANNEL_ID, {
-      text: "@alice I read the mission as: marketplace site first, then SEO and social, revenue from featured slots. Correct?",
+      text: "[@alice](mention://user/alice) I read the mission as: marketplace site first, then SEO and social, revenue from featured slots. Correct?",
       sessionId: ceoDesk,
     });
     expect(m1.sender).toBe(`agent:${CEO}`);
@@ -88,7 +88,7 @@ describe("scenario: the DeepSeek Harness plugin Marketplace company", () => {
     );
     expect(board.mentionsMe).toBe(1);
     await service.sendChannelMessage(P, ORG, "alice", DEFAULT_CHANNEL_ID, {
-      text: `@${CEO} Correct. Go.`,
+      text: `[@${CEO}](mention://agent/${CEO}) Correct. Go.`,
     });
     expect(
       triggers().filter((t) => t.origin?.origin.kind === "mention" && t.sessionId === ceoDesk),
@@ -260,13 +260,13 @@ describe("scenario: the DeepSeek Harness plugin Marketplace company", () => {
     // Marketing is not in it: a message naming it is refused before anything is written.
     await expect(
       service.sendChannelMessage(P, ORG, "alice", "site", {
-        text: `@${MKT} can you look at the copy?`,
+        text: `[@${MKT}](mention://agent/${MKT}) can you look at the copy?`,
         sessionId: ceoDesk,
       }),
     ).rejects.toMatchObject({ status: 400, code: "mention_not_member" });
     h.started.length = 0;
     const kickoff = await service.sendChannelMessage(P, ORG, "alice", "site", {
-      text: `@${DEV} the site ticket is yours; talk to me here.`,
+      text: `[@${DEV}](mention://agent/${DEV}) the site ticket is yours; talk to me here.`,
       sessionId: ceoDesk,
     });
     const inChannel = triggers().filter((t) => t.origin?.origin.kind === "mention");
@@ -278,7 +278,7 @@ describe("scenario: the DeepSeek Harness plugin Marketplace company", () => {
     });
     // The CEO says so once in the all-hands channel, where the board reads.
     await service.sendChannelMessage(P, ORG, "alice", DEFAULT_CHANNEL_ID, {
-      text: "Opened the #site channel for the site stream; @alice you can follow it there.",
+      text: "Opened the #site channel for the site stream; [@alice](mention://user/alice) you can follow it there.",
       sessionId: ceoDesk,
     });
     const channels = await service.channels(P, ORG, { userId: "alice" });
@@ -429,7 +429,7 @@ describe("scenario: the DeepSeek Harness plugin Marketplace company", () => {
     );
     await service.moveTicket(P, ORG, slots.ticketId, "done", undefined, ceoActor);
     await service.sendChannelMessage(P, ORG, "alice", DEFAULT_CHANNEL_ID, {
-      text: "@alice The site is live, SEO and social are running, and the first paid featured slot sold.",
+      text: "[@alice](mention://user/alice) The site is live, SEO and social are running, and the first paid featured slot sold.",
       sessionId: ceoDesk,
     });
     const overview = await service.detail(P, ORG, "alice");
