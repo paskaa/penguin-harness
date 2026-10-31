@@ -120,9 +120,11 @@ export const en: Strings = {
       ready: "Running",
       reconnecting: "Reconnecting",
       reconnectStopped: "Reconnect stopped",
+      reconnectFailed: "Reconnect failed",
       failed: "Failed",
       installedOnly: "Installed",
       behind: "Update available",
+      restartNeeded: "Restart needed",
       notConnected: "Not connected",
       unreachable: "Unreachable",
       stopped: "Stopped",
@@ -177,8 +179,11 @@ export const en: Strings = {
       connected: "Connected",
       dialling: "Dialling",
       refused: "Refused",
+      unanswered: "Can't connect",
       failed: "Failed",
     },
+    restartNeededReason:
+      "This machine is on a different version, so its conversations won't update by themselves. Click Restart server; if that doesn't help, reinstall it.",
     agentsUnreachable: "That machine is not connected — use it from the Machines page",
     adminOnly: "Only an admin can manage machines.",
     updateNotice: (count: number) =>
@@ -264,19 +269,22 @@ export const en: Strings = {
       reconnect: {
         title: "Reconnecting",
         lasting: (span: string) => `For ${span}`,
-        lastError: "Last failure:",
+        lastError: "Last failure",
         checked: "What the automatic check found:",
       },
     },
     retry: {
-      trying: (n: number, m: number) => `Trying to reconnect (${n} of ${m})…`,
-      lost: "Connection lost",
+      trying: (n: number, m: number) => `Reconnecting (attempt ${n}/${m})`,
+      waiting: (seconds: number, n: number, m: number) =>
+        `Reconnecting in ${seconds} s (attempt ${n}/${m})`,
       failed: (n: number, m: number) => `Reconnect ${n} of ${m} failed`,
-      countdown: (seconds: number) => `next try in ${seconds} s`,
-      gaveUp: (m: number) => `Stopped retrying after ${m} failed reconnects`,
-      stoppedSsh: "Stopped reconnecting",
-      stoppedPassword: "Sign-in refused; stopped reconnecting",
+      gaveUp: (m: number) => `Reconnect failed after ${m} attempts`,
+      cancelled: "Stopped retrying",
+      stoppedSsh: "Reconnect failed; fix ssh first",
+      stoppedPassword: "Sign-in refused; not retrying",
+      lastFailure: "Last failure",
       retryNow: "Retry now",
+      stop: "Stop retrying",
       retry: "Retry",
     },
     confirm: {
@@ -422,7 +430,7 @@ export const en: Strings = {
     /** Starts another shell: the terminal panel's "+" and the standalone /terminal page's button. */
     newShell: "New terminal",
     /** The terminal panel's name: its dock tab, its "+" menu row, picker row and launcher entry. */
-    shellEntry: "Command-line terminal",
+    shellEntry: "Terminal",
     /** The terminal panel's strip of shells, for assistive technology. */
     tabsLabel: "Terminal tabs",
     /** Tab strip ×: kills the shell itself (server-side), unlike closing the dock. */
@@ -894,7 +902,7 @@ export const en: Strings = {
     theme: "Theme",
     background: {
       title: "Background",
-      info: "Stored only in this browser or desktop app; never uploaded. PNG, JPEG or WebP, up to 20 MB. Higher transparency makes the image fainter.",
+      info: "Saved to your account, so you also see it when you sign in on another browser or in the desktop app. PNG, JPEG or WebP images up to 20 MB. The higher the transparency, the fainter the image.",
       choose: "Choose image",
       replace: "Replace image",
       remove: "Remove",
@@ -961,6 +969,8 @@ export const en: Strings = {
     notificationsDismissed:
       "The permission prompt was closed without an answer, so notifications stay off. Turn this on again to ask once more.",
     notificationsUnsupported: "This browser does not support system notifications.",
+    notificationsNotAllowedHere:
+      "You turned notifications on elsewhere, but this browser can't show them yet. Turn this on, then choose Allow when your browser asks.",
     trayIcon: "Tray icon",
     trayIconInfo:
       "The desktop app keeps an icon in the system tray — the Windows notification area, the macOS menu bar, the Linux tray — for as long as it runs: click it to come back to the window, right-click it to start a session or quit. On by default; turning it off removes the icon at once, no restart, and closing the window then no longer hides it, so the app stays in the Dock on macOS and quits on Windows and Linux.",
@@ -1931,6 +1941,18 @@ export const en: Strings = {
       `Company employee: ${employments.map((e) => `${e.orgName} · ${e.title}`).join(", ")}`,
     deleteConfirm: (name: string): string =>
       `Delete agent "${name}"? Its directory (including all Traces) will be removed recursively and cannot be recovered.`,
+    deletingAgent: (name: string): string => `Deleting agent "${name}"`,
+    deletedAgent: (name: string): string => `Deleted agent "${name}"`,
+    deleteIncomplete: (name: string): string =>
+      `Some files of agent "${name}" could not be removed`,
+    deleteCounting: (found: number): string =>
+      `Counting: ${found.toLocaleString("en-US")} ${found === 1 ? "item" : "items"} found`,
+    deleteRemoving: (removed: number, total: number): string =>
+      `${removed.toLocaleString("en-US")} of ${total.toLocaleString("en-US")} ${total === 1 ? "item" : "items"} removed`,
+    deleteRemoved: (total: number): string =>
+      `${total.toLocaleString("en-US")} ${total === 1 ? "item" : "items"} removed`,
+    deleteRetryOnRestart: (error: string): string =>
+      `${error}. The rest is removed when the server next starts.`,
     stateTitle: "Agent State",
     stateVersion: "Agent State version",
     transferDesc:
@@ -3905,24 +3927,19 @@ Scenarios:
       const text = cause ? `${cause}${item?.errorMessage ? `: ${item.errorMessage}` : ""}` : "";
       return `[Aborted]${text ? `: ${text}` : ""}`;
     },
-    /**
-     * Reconnect hint line; `secondsLeft` (waiting state only) switches to the live-countdown
-     * wording. `retryable` is the live status; the finer spellings only appear when
-     * replaying Traces written before the stop-reason convergence.
-     */
-    reconnect: (
-      status: "retryable" | "failed" | "timeout" | "malformed",
-      state: "waiting" | "retried" | "gaveUp",
-      attempt: number,
-      secondsLeft?: number,
-      errorMessage?: string,
-      errorCode?: string,
-    ) => {
-      // The live protocol carries the classified cause on error_code; the legacy status
-      // spellings (failed/timeout/malformed) say the same thing for pre-convergence Traces.
-      const kind = errorCode ?? status;
-      const cause =
-        kind === "timeout"
+    requestRetry: {
+      waiting: (seconds: number, n: number, m: number) =>
+        `Retrying in ${seconds} s (attempt ${n}/${m})`,
+      sending: (n: number, m: number) => `Retrying (attempt ${n}/${m})`,
+      sent: (n: number, m: number) => `Retried (attempt ${n}/${m})`,
+      gaveUp: (attempts: number) =>
+        attempts > 1 ? `Request failed after ${attempts} attempts` : "Request failed",
+      cause: (
+        status: "retryable" | "failed" | "timeout" | "malformed",
+        errorCode?: string,
+      ): string => {
+        const kind = errorCode ?? status;
+        return kind === "timeout"
           ? "Connection timed out"
           : kind === "malformed"
             ? "Response incomplete or unparseable"
@@ -3935,23 +3952,13 @@ Scenarios:
                   : kind === "failed"
                     ? "The model provider returned an error"
                     : "The request failed";
-      const action =
-        state === "gaveUp"
-          ? `giving up after attempt ${attempt}${errorMessage ? `: ${errorMessage}` : ""}`
-          : state === "retried"
-            ? `retry #${attempt} sent`
-            : secondsLeft !== undefined
-              ? `retry #${attempt} in ${secondsLeft}s…`
-              : `starting retry #${attempt}…`;
-      return `[Retry] ${cause}; ${action}`;
+      },
+      retryNow: "Retry now",
+      stop: "Stop retrying",
     },
     /** Run-ending LLM failure banner (request_end status fatal); the provider's error text rides verbatim. */
     llmError: (errorMessage?: string) =>
       `[Error]: llm request error${errorMessage ? `: ${errorMessage}` : ""}`,
-    /** "Retry now" on the reconnect countdown (skips the remaining backoff wait). */
-    reconnectRetryNow: "Retry now",
-    /** "Give up" on the reconnect countdown (the ordinary session abort). */
-    reconnectGiveUp: "Give up",
     /** "Retry" on the line a run ended on (the error banner, a reconnect line that gave up, or the stop marker): sends the unfinished turn's input again, with no new message. */
     retryRun: "Retry",
     /** Toast when Retry finds nothing held: the unfinished turn's input already went out with a later message. */
@@ -4030,6 +4037,11 @@ Scenarios:
       missing: "This conversation's machine is not on this Project's machine list",
       hint: "The conversation is kept on that machine and loads as soon as the connection is back.",
       details: "Technical details",
+    },
+    machineRestartNeeded: {
+      body: (alias: string) =>
+        `${alias} is on a different version, so this conversation won't update by itself. Go to Machines and restart it.`,
+      open: "Go to Machines",
     },
     statsLabel: "Stats",
     removeImage: "Remove image",
@@ -6549,6 +6561,8 @@ Scenarios:
       desk_unavailable: "The desk session could not be opened.",
       agent_employed:
         "This agent is still an employee of an organization: make it leave in company mode, then delete it.",
+      agent_folder_busy:
+        "Another program has a file in this agent's folder open, so the folder could not be moved and nothing was deleted. Close that program and try again.",
       ticket_not_found: "That ticket no longer exists.",
       ticket_invalid: "This ticket file needs repair; it accepts no changes until then.",
       ticket_session_failed: "The ticket session could not be started.",

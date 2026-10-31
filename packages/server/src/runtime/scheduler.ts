@@ -175,13 +175,18 @@ export class Scheduler implements Scheduling {
     this.channels.get(userChannelKey(userId)).publish(event, "server_event");
   }
 
-  /** Start: run one reconcile immediately (startup semantics: no backfill), then enter the periodic tick. */
+  /**
+   * Start: the periodic tick, and one reconcile now (startup semantics: no backfill) — the
+   * returned promise is that first pass. The tick is armed first, so a stop that comes while
+   * the pass runs leaves nothing armed; a tick that comes due meanwhile finds the pass running
+   * and does nothing.
+   */
   async start(): Promise<void> {
-    await this.tickOnce();
     this.timer = setInterval(() => {
       void this.tickOnce();
     }, this.intervalMs);
     this.timer.unref?.();
+    await this.tickOnce();
   }
 
   stop(): void {
@@ -324,7 +329,8 @@ export class Scheduler implements Scheduling {
       const items = await fs.readdir(agentsDir(this.root, projectId), {
         withFileTypes: true,
       });
-      ids = items.filter((d) => d.isDirectory()).map((d) => d.name);
+      // A dot-directory (`.deleting/`, where a deleted Agent's files wait) is never an Agent.
+      ids = items.filter((d) => d.isDirectory() && !d.name.startsWith(".")).map((d) => d.name);
     } catch {
       this.agentDirs.delete(projectId);
       return [];
@@ -466,13 +472,13 @@ export class Scheduler implements Scheduling {
     await this.dispatch(projectId, agentId, def, state);
   }
 
-  /** Send one fire: queue if the bound Session is busy; in new-Session mode, create and send immediately. */
+  /** Send one fire: queue if the bound Session is busy; in new-Session mode, create and send immediately. Returns the new Session id (new-Session mode) or null on failure. */
   private async dispatch(
     projectId: string,
     agentId: string,
     def: ScheduleDefinition,
     state: ScheduleStateRow,
-  ): Promise<void> {
+  ): Promise<{ sessionId: string; queued: boolean } | null> {
     const key = this.keyOf(projectId, agentId, def.name);
     if (def.sessionId !== undefined) {
       const row = this.sessions.findById(def.sessionId);
@@ -486,7 +492,7 @@ export class Scheduler implements Scheduling {
           ctx: { projectId, agentId, sessionId: def.sessionId },
         });
         this.repo.markInvalid(projectId, agentId, def.name, "session_missing");
-        return;
+        return null;
       }
       if (this.runner.statusOf(def.sessionId) !== "idle") {
         // Queue when busy: at most one per task; new slots during the wait are consumed but don't stack.
@@ -500,10 +506,10 @@ export class Scheduler implements Scheduling {
             sessionId: def.sessionId,
           });
         }
-        return;
+        return { sessionId: def.sessionId, queued: true };
       }
       await this.send(projectId, agentId, def, state, def.sessionId);
-      return;
+      return { sessionId: def.sessionId, queued: false };
     }
     // New-Session mode: each fire opens a new session (optional workspace and paired model ref; same semantics as opening a session manually).
     try {

@@ -39,14 +39,20 @@ export const ORIGIN_MODELS_MAX = 1000;
 export class UsageRecorder implements UsageRecording {
   /** Subagent model attribution mapping: origin's last session_id → paired reference (session_id is globally unique). */
   private readonly originModels = new Map<string, { provider: string; modelId: string }>();
+  /** One request at a time per Session: whether its streamed request_begin has been metered. */
+  private readonly requests = new Map<string, boolean>();
 
   @Use() private readonly usage!: UsageStore;
   /** Optional: the row-cache invalidation hook. A missing figure costs nothing; a failed run costs everything. */
   @Use() private readonly queries?: UsageQueries;
   @Use() private readonly clock!: Clock;
 
-  /** Consume one outgoing message; messages other than session_meta / token_usage are a no-op. */
-  async record(ctx: UsageContext, msg: AmspRecord): Promise<void> {
+  /** Standalone usage (such as titles) is billed without metering the Session's active request. */
+  async record(
+    ctx: UsageContext,
+    msg: AmspRecord,
+    source: "stream" | "standalone" = "stream",
+  ): Promise<void> {
     if (isSessionMeta(msg) && msg.origin && msg.origin.length > 0) {
       const originSessionId = msg.origin[msg.origin.length - 1]!;
       // Bounded mapping (avoids unbounded growth over a long-running process): re-inserting refreshes insertion order, over the limit evicts the oldest.
@@ -71,6 +77,13 @@ export class UsageRecorder implements UsageRecording {
 
     const originSessionId =
       msg.origin && msg.origin.length > 0 ? msg.origin[msg.origin.length - 1]! : null;
+    const requestSessionId = originSessionId ?? ctx.sessionId;
+    if (payload.type === "request_begin") {
+      this.requests.set(requestSessionId, false);
+      return;
+    }
+    const metered = this.requests.get(requestSessionId) === true;
+    if (payload.type === "request_end") this.requests.delete(requestSessionId);
     // Empty origin → main session's Model; otherwise look up the mapping, falling back to the main Session's Model (paired) on a miss.
     const ref =
       originSessionId === null
@@ -101,6 +114,11 @@ export class UsageRecorder implements UsageRecording {
         output: r.output,
         total: r.total,
       });
+      // Compaction streams usage but keeps its request boundaries in the Trace. Do not
+      // retain state for those unpaired records after the compaction has finished.
+      if (source === "stream" && this.requests.has(requestSessionId)) {
+        this.requests.set(requestSessionId, true);
+      }
       // The aggregated rows are cached for a short TTL; new tokens have landed, so those rows
       // are now behind. Optional-chained on purpose — telemetry must never fail a run over a
       // cache, and the TTL alone bounds how stale a figure can be.
@@ -109,13 +127,13 @@ export class UsageRecorder implements UsageRecording {
     }
     // A failed request (request_end and not completed, with no token_usage): persist 0 tokens
     // + status, feeding the "model success rate" stat. A successful request is already counted
-    // once via the token_usage branch above, not repeated here — and so is one cut off at its
-    // output cap (`output_truncated`): the provider delivered and billed it (its token_usage
-    // came first), it was only cut at the cap.
+    // once via token_usage, even if an abnormal finish reason made it retryable. Preserve
+    // the output-cap exception for streams that did not supply a request_begin as well.
     if (
       payload.type === "request_end" &&
       payload.status &&
       payload.status !== "completed" &&
+      !metered &&
       payload.error_code !== "output_truncated"
     ) {
       this.usage.insert({

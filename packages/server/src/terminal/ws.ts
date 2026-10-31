@@ -12,19 +12,16 @@
  *
  * Auth: the session cookie rides along on the upgrade request, so the same credential as
  * the REST API is used, plus an Origin check — a WebSocket handshake is not subject to
- * CORS, so without it any page the user visits could open a shell on this machine.
+ * CORS, so without it any page the user visits could open a shell on this machine. A browser
+ * that sends `Sec-Fetch-Site` must say `same-origin` there too, as on a write.
  */
 import type { IncomingMessage, Server as HttpServer } from "node:http";
 import { format } from "node:url";
 import { TLSSocket } from "node:tls";
 import type { Duplex } from "node:stream";
 import { WebSocketServer } from "ws";
-import {
-  isOwnOrigin,
-  originTarget,
-  parseCookieHeader,
-  sessionCookies,
-} from "../auth/middleware.js";
+import { parseCookieHeader, sessionCookies } from "../auth/middleware.js";
+import { acceptsOrigin, publicOrigin, sameOriginSite } from "../http/public-origin.js";
 import type { ServerHmrHost } from "../hmr/platform.js";
 import type { Auth } from "../mechanisms/identity.js";
 import { API_SOCKET_PATH } from "../api/types.js";
@@ -50,7 +47,10 @@ const BACKPRESSURE_POLL_MS = 250;
 export interface TerminalWebSocketDeps {
   /** The booted platform owns the terminals; the runtime asks it per upgrade. */
   hmr: ServerHmrHost;
+  /** PENGUIN_TRUST_PROXY=1 (OriginRule.trustProxy). */
   trustProxy?: boolean;
+  /** Desktop mode: the handshake also takes the request's own origin (OriginRule.acceptOwnOrigin). */
+  acceptOwnOrigin?: boolean;
   authService: Auth;
   log: (line: string) => void;
 }
@@ -67,6 +67,7 @@ export function attachTerminalWebSocket(server: HttpServer, deps: TerminalWebSoc
     if (!match && !apiSocket) return;
 
     let target: URL;
+    let streamUrl: URL;
     try {
       // IncomingMessage has no Fetch Request URL; Node formats its transport authority.
       if (!req.headers.host) return refuse(socket, 403, "Forbidden");
@@ -74,20 +75,25 @@ export function attachTerminalWebSocket(server: HttpServer, deps: TerminalWebSoc
       target = new URL(
         format({ protocol, host: req.headers.host, pathname: url.pathname, slashes: true }),
       );
-      const forwarded = req.headers["x-forwarded-proto"];
+      const header = (name: string): string | undefined => {
+        const value = req.headers[name];
+        return Array.isArray(value) ? value.join(",") : value;
+      };
+      const forwarded = { proto: header("x-forwarded-proto"), host: header("x-forwarded-host") };
+      const trustProxy = deps.trustProxy ?? false;
+      const rule = { trustProxy, acceptOwnOrigin: deps.acceptOwnOrigin ?? false };
       if (
-        req.headers.origin &&
-        !isOwnOrigin(
-          req.headers.origin,
-          originTarget(
-            target,
-            Array.isArray(forwarded) ? forwarded.join(",") : forwarded,
-            deps.trustProxy ?? false,
-          ),
-        )
+        !sameOriginSite(header("sec-fetch-site")) ||
+        !acceptsOrigin(req.headers.origin, target, forwarded, rule)
       ) {
         return refuse(socket, 403, "Forbidden");
       }
+      // The platform gets the public origin with the path and query: the API socket addresses
+      // every call it carries to that origin, so a route that builds a URL back to the App (an
+      // OAuth callback) sees the browser's scheme, host and port, as it does over HTTP.
+      streamUrl = new URL(publicOrigin(target, forwarded, trustProxy));
+      streamUrl.pathname = url.pathname;
+      streamUrl.search = url.search;
     } catch {
       return refuse(socket, 403, "Forbidden");
     }
@@ -107,7 +113,7 @@ export function attachTerminalWebSocket(server: HttpServer, deps: TerminalWebSoc
           // No terminal lookup: the socket carries the whole API as the cookie's user.
           const ref = apiSocketRef(authed.user.userId);
           return wss.handleUpgrade(req, socket, head, (ws) => {
-            platform.api.attachStream?.(ws, ref, url, deps.log);
+            platform.api.attachStream?.(ws, ref, streamUrl, deps.log);
           });
         }
         const manager = platform.api.terminals?.();
@@ -116,7 +122,7 @@ export function attachTerminalWebSocket(server: HttpServer, deps: TerminalWebSoc
           return refuse(socket, 404, "Not Found");
         }
         wss.handleUpgrade(req, socket, head, (ws) => {
-          platform.api.attachStream?.(ws, session, url, deps.log);
+          platform.api.attachStream?.(ws, session, streamUrl, deps.log);
         });
       })
       .catch((err: unknown) => {

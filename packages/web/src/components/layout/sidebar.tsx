@@ -207,8 +207,9 @@ import { PinnedBalanceBadge } from "../../features/models/group-balance";
 import { isCurrentPath, renderRouterLink } from "./router-link";
 import { navNoteFor, useUpdateBadges } from "../../lib/use-update-badges";
 import { pendingScheduleSessions } from "../../features/schedules/schedule-panel-state";
-import { useProjectSchedules, useSchedulesAcross } from "../../features/schedules/schedule-store";
+import { useSchedulesAcross } from "../../features/schedules/schedule-store";
 import { showArchiveReceipt } from "../../features/archived/archive-receipt";
+import { useLocalShown } from "../../lib/local-first";
 import { useCompany } from "../../state/company";
 import { NoOrganizationsSidebar, OrgSwitcher } from "../../features/company/org-switcher";
 import { CompanyBetaBadge } from "../../features/company/company-beta";
@@ -388,8 +389,13 @@ export function Sidebar({
   // marks until the user came back to them. Re-read on every navigation: opening a conversation
   // is the moment a task may just have been created or switched off. Read on every server whose
   // Sessions this list draws: a task bound to a conversation on a machine is that machine's file,
-  // and only that machine lists it.
-  const projectSchedules = useSchedulesAcross(currentProjectId, machineIds, activeSessionId ?? "");
+  // and only that machine lists it — once this window's own content is on screen.
+  const localShown = useLocalShown();
+  const projectSchedules = useSchedulesAcross(
+    currentProjectId,
+    localShown ? machineIds : [],
+    activeSessionId ?? "",
+  );
   // The Sessions wearing the alarm clock: one bound task with a next fire time is enough. The
   // store re-renders these rows on every refresh (a navigation, a schedule event, a turn ending,
   // the panel's poll), and the server recomputes `nextFireAt` on each listing, so a task that

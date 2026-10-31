@@ -147,11 +147,14 @@ export const zh = {
       working: "处理中",
       ready: "运行中",
       reconnecting: "重新连接中",
-      /** The automatic attempts stopped (eight failures, or an ssh failure no retry mends): Retry is the way on. */
+      /** A person stopped retrying: Retry is the way on. */
       reconnectStopped: "重连已停止",
+      /** The attempts ran out, or ssh refused in a way no retry mends: Retry is the way on. */
+      reconnectFailed: "重连失败",
       failed: "失败",
       installedOnly: "已安装",
       behind: "有新版本",
+      restartNeeded: "需要重启",
       notConnected: "未连接",
       unreachable: "连不上",
       stopped: "已停止",
@@ -214,8 +217,12 @@ export const zh = {
       connected: "已连接",
       dialling: "拨号中",
       refused: "被拒绝",
+      unanswered: "连接不上",
       failed: "失败",
     },
+    /** Why a machine reads as needing a restart: the status pill's hover. */
+    restartNeededReason:
+      "这台机器的版本和当前不一致，对话不会自动刷新。请点「重启服务」；还不行就重新安装。",
     agentsUnreachable: "那台机器尚未连接——请在「机器管理」页面使用它",
     adminOnly: "只有管理员可以管理机器。",
     /** The notice under the title while machines carry another build; its action updates them all. */
@@ -324,26 +331,33 @@ export const zh = {
       reconnect: {
         title: "重新连接",
         lasting: (span: string) => `已持续 ${span}`,
-        lastError: "上次失败：",
+        lastError: "上次失败",
         checked: "自动检查的结果：",
       },
     },
     /**
-     * The retry status while the server brings a machine back (the card's middle, the dialog's
-     * Reconnecting section): `n` is the attempt, `m` the failures in a row that stop the streak.
+     * The retry row while the server brings a machine back (the card's middle, the dialog's
+     * Reconnecting section, a conversation on that machine): `n` is the attempt, `m` the
+     * failures in a row that stop the streak.
      */
     retry: {
-      trying: (n: number, m: number) => `正在尝试第 ${n}/${m} 次重连…`,
-      /** Waiting for the first attempt: nothing has failed yet. */
-      lost: "连接已断开",
+      /** An attempt running — and a wait whose moment has come. */
+      trying: (n: number, m: number) => `正在尝试第 ${n}/${m} 次重连`,
+      /** Waiting for the next attempt, the seconds ticking. */
+      waiting: (seconds: number, n: number, m: number) => `${seconds} 秒后尝试第 ${n}/${m} 次重连`,
+      /** The status pill's reason while it waits after a failure. */
       failed: (n: number, m: number) => `第 ${n}/${m} 次重连失败`,
-      countdown: (seconds: number) => `${seconds} 秒后重连`,
-      gaveUp: (m: number) => `${m} 次重连都没连上，已停止自动重试`,
-      /** ssh refused in a way no retry mends; the reason under it says the fix. */
-      stoppedSsh: "已停止自动重连",
+      gaveUp: (m: number) => `${m} 次重连均失败`,
+      /** A person stopped retrying. */
+      cancelled: "已放弃重试",
+      /** ssh refused in a way no retry mends; the "?" says the fix. */
+      stoppedSsh: "重连失败，需先解决 ssh 问题",
       /** The stored password was refused: no Retry, the fix is in the machine's SSH settings. */
       stoppedPassword: "登录被拒，已停止重连",
+      /** The title over the last attempt's failure behind the "?". */
+      lastFailure: "上次失败",
       retryNow: "立即重试",
+      stop: "放弃重试",
       retry: "重试",
     },
     /** The confirmations the page asks before a verb that stops or removes something. */
@@ -1022,7 +1036,7 @@ export const zh = {
     theme: "主题",
     background: {
       title: "背景图片",
-      info: "图片仅保存在当前浏览器或桌面端，不会上传。支持 PNG、JPEG、WebP，最大 20 MB。透明度越高，图片越淡。",
+      info: "图片会保存在你的账号里，换一个浏览器或在桌面应用登录也能看到。支持 PNG、JPEG、WebP 图片，不超过 20 MB。透明度越高，图片越淡。",
       choose: "选择图片",
       replace: "更换图片",
       remove: "移除",
@@ -1085,6 +1099,9 @@ export const zh = {
     notificationsDismissed:
       "权限提示被关闭、没有给出答复，通知因此保持关闭。再次打开这个开关可以重新申请。",
     notificationsUnsupported: "当前浏览器不支持系统通知。",
+    /** The account wants notifications, but this browser was never granted permission to show them. */
+    notificationsNotAllowedHere:
+      "你在别处开启了通知，但这个浏览器还不能显示。打开这个开关，在浏览器的提示里点「允许」。",
     /** Desktop shell only: the system-tray icon. Absent in a browser. */
     trayIcon: "托盘图标",
     trayIconInfo:
@@ -2048,6 +2065,22 @@ export const zh = {
       `公司模式员工：${employments.map((e) => `${e.orgName} · ${e.title}`).join("、")}`,
     deleteConfirm: (name: string): string =>
       `确认删除 Agent「${name}」？其目录（含全部 Trace）将被递归删除，不可恢复。`,
+    /**
+     * The delete's progress card: its title while the Agent's files are removed in the
+     * background, once they are all gone, and when some could not be removed.
+     */
+    deletingAgent: (name: string): string => `正在删除 Agent「${name}」`,
+    deletedAgent: (name: string): string => `已删除 Agent「${name}」`,
+    deleteIncomplete: (name: string): string => `Agent「${name}」有文件未能删除`,
+    /** The card's line: while the folder is walked, while it is removed, and at the end (files and folders alike). */
+    deleteCounting: (found: number): string =>
+      `正在统计，已找到 ${found.toLocaleString("zh-CN")} 项`,
+    deleteRemoving: (removed: number, total: number): string =>
+      `已删除 ${removed.toLocaleString("zh-CN")} / ${total.toLocaleString("zh-CN")} 项`,
+    deleteRemoved: (total: number): string => `共删除 ${total.toLocaleString("zh-CN")} 项`,
+    /** A removal that stopped short: the operating system's reason, and when the rest goes. */
+    deleteRetryOnRestart: (error: string): string =>
+      `${error}。其余文件会在服务端下次启动时再删除。`,
     /** Agent State section: the State version with the snapshot transfer actions, plus the copyable State path. */
     stateTitle: "Agent State",
     stateVersion: "Agent State 版本",
@@ -4078,23 +4111,28 @@ Benchmark：
       return `[已中断]${text ? `：${text}` : ""}`;
     },
     /**
-     * Reconnect hint line; `secondsLeft` (waiting state only) switches to the live-countdown
-     * wording. `retryable` is the live status; the finer spellings only appear when
-     * replaying Traces written before the stop-reason convergence.
+     * The model request's retry row, one per ladder: `n` is the attempt it is about — the next
+     * one while it waits, the one sent after — of the turn's `m` at most (the engine counts the
+     * first request as attempt 1).
      */
-    reconnect: (
-      status: "retryable" | "failed" | "timeout" | "malformed",
-      state: "waiting" | "retried" | "gaveUp",
-      attempt: number,
-      secondsLeft?: number,
-      errorMessage?: string,
-      errorCode?: string,
-    ) => {
-      // The live protocol carries the classified cause on error_code; the legacy status
-      // spellings (failed/timeout/malformed) say the same thing for pre-convergence Traces.
-      const kind = errorCode ?? status;
-      const cause =
-        kind === "timeout"
+    requestRetry: {
+      waiting: (seconds: number, n: number, m: number) => `${seconds} 秒后发起第 ${n}/${m} 次请求`,
+      /** The wait is over (or there was none) and the request is going out. */
+      sending: (n: number, m: number) => `正在发起第 ${n}/${m} 次请求`,
+      /** The request went out; the row now only records it. */
+      sent: (n: number, m: number) => `已发起第 ${n}/${m} 次请求`,
+      gaveUp: (attempts: number) => (attempts > 1 ? `${attempts} 次请求均失败` : "请求失败"),
+      /**
+       * Why it retried, in words: the title over the provider's own message behind the row's
+       * "?". The live protocol carries the classified cause on `error_code`; the legacy status
+       * spellings (failed/timeout/malformed) say the same thing for pre-convergence Traces.
+       */
+      cause: (
+        status: "retryable" | "failed" | "timeout" | "malformed",
+        errorCode?: string,
+      ): string => {
+        const kind = errorCode ?? status;
+        return kind === "timeout"
           ? "连接超时或网络中断"
           : kind === "malformed"
             ? "响应不完整或无法解析"
@@ -4107,23 +4145,15 @@ Benchmark：
                   : kind === "failed"
                     ? "模型服务返回错误"
                     : "请求失败";
-      const action =
-        state === "gaveUp"
-          ? `第 ${attempt} 次尝试后放弃${errorMessage ? `：${errorMessage}` : ""}`
-          : state === "retried"
-            ? `已发起第 ${attempt} 次重试`
-            : secondsLeft !== undefined
-              ? `第 ${attempt} 次重试，${secondsLeft} 秒后发起…`
-              : `正在发起第 ${attempt} 次重试…`;
-      return `[重试] ${cause}，${action}`;
+      },
+      /** Skips the remaining backoff wait. */
+      retryNow: "立即重试",
+      /** The ordinary session abort. */
+      stop: "放弃重试",
     },
     /** Run-ending LLM failure banner (request_end status fatal); the provider's error text rides verbatim. */
     llmError: (errorMessage?: string) =>
       `[错误]：模型请求错误${errorMessage ? `：${errorMessage}` : ""}`,
-    /** "Retry now" on the reconnect countdown (skips the remaining backoff wait). */
-    reconnectRetryNow: "立即重试",
-    /** "Give up" on the reconnect countdown (the ordinary session abort). */
-    reconnectGiveUp: "放弃",
     /** "Retry" on the line a run ended on (the error banner, a reconnect line that gave up, or the stop marker): sends the unfinished turn's input again, with no new message. */
     retryRun: "重试",
     /** Toast when Retry finds nothing held: the unfinished turn's input already went out with a later message. */
@@ -4208,6 +4238,12 @@ Benchmark：
       missing: "这个对话所在的机器不在当前 Project 的机器列表中",
       hint: "对话保存在那台机器上，连接恢复后会自动加载。",
       details: "技术细节",
+    },
+    /** Above the composer while the conversation's machine reads as needing a restart. */
+    machineRestartNeeded: {
+      body: (alias: string) =>
+        `${alias} 的版本和当前不一致，这里的对话不会自动刷新。请到「机器管理」重启这台机器。`,
+      open: "去机器管理",
     },
     statsLabel: "统计信息",
     removeImage: "移除图片",
@@ -6746,6 +6782,8 @@ Benchmark：
       calendar_event_not_found: "该日程已不存在。",
       desk_unavailable: "无法打开工位会话。",
       agent_employed: "该 Agent 仍是组织的员工：先在公司模式让其离任，再删除。",
+      agent_folder_busy:
+        "其他程序正占用该 Agent 目录中的文件，目录无法移走，未删除任何内容。关闭该程序后重试。",
       ticket_not_found: "该工单已不存在。",
       ticket_invalid: "该工单文件需要修复，修好前不接受改动。",
       ticket_session_failed: "无法发起工单会话。",
