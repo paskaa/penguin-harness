@@ -286,6 +286,30 @@ export function shape(db: DatabaseSync): string {
   );
 }
 
+/**
+ * A stable ORDER BY for one table. `rowid` does not exist on a `WITHOUT ROWID` table (the
+ * search tables are declared that way), so those order by their primary key instead —
+ * `contents()` compares snapshots, and an unordered dump would make the comparison depend
+ * on storage order rather than on the data.
+ */
+function orderBy(db: DatabaseSync, table: string): string {
+  const ddl = (
+    db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) as
+      | { sql?: string | null }
+      | undefined
+  )?.sql;
+  if (ddl && /WITHOUT\s+ROWID/i.test(ddl)) {
+    const pk = (
+      db.prepare(`PRAGMA table_info(${table})`).all() as { name: string; pk: number }[]
+    )
+      .filter((c) => c.pk > 0)
+      .sort((a, b) => a.pk - b.pk)
+      .map((c) => c.name);
+    return pk.length > 0 ? `ORDER BY ${pk.join(", ")}` : "";
+  }
+  return "ORDER BY rowid";
+}
+
 /** Every row of every table but the ledger, so a re-run that lost or changed data shows. */
 export function contents(db: DatabaseSync): string {
   const tables = (
@@ -296,6 +320,6 @@ export function contents(db: DatabaseSync): string {
       .all() as { name: string }[]
   ).map((t) => t.name);
   return JSON.stringify(
-    tables.map((t) => [t, db.prepare(`SELECT * FROM ${t} ORDER BY rowid`).all()]),
+    tables.map((t) => [t, db.prepare(`SELECT * FROM ${t} ${orderBy(db, t)}`).all()]),
   );
 }

@@ -164,7 +164,7 @@ export function convertPlaceholders(sql: string): { sql: string; named: string[]
     // named param :name (not ::cast, not := )
     if (ch === ":" && next && /[A-Za-z_]/.test(next) && sql[i - 1] !== ":") {
       let j = i + 1;
-      while (j < n && /[A-Za-z0-9_]/.test(sql[j])) j += 1;
+      while (j < n && /[A-Za-z0-9_]/.test(sql[j]!)) j += 1;
       const name = sql.slice(i + 1, j);
       const seen = named.indexOf(name);
       if (seen !== -1) {
@@ -194,8 +194,8 @@ function parseInsert(sql: string): { table: string; columns: string[] } | null {
     /INSERT\s+(?:OR\s+(?:REPLACE|IGNORE)\s+)?INTO\s+["']?([A-Za-z_][A-Za-z0-9_]*)["']?\s*\(([^)]*)\)/i,
   );
   if (!m) return null;
-  const table = m[1];
-  const columns = m[2]
+  const table = m[1]!;
+  const columns = m[2]!
     .split(",")
     .map((c) => c.trim().replace(/^["']|["']$/g, ""))
     .filter((c) => c.length > 0);
@@ -271,12 +271,12 @@ function translateFts(sql: string): string {
   if (vt) {
     const table = vt[1];
     const cols: Array<{ name: string; indexed: boolean }> = [];
-    for (const raw of vt[2].split(",")) {
+    for (const raw of vt[2]!.split(",")) {
       const line = raw.trim();
       if (!line) continue;
       const m = line.match(/^["']?([A-Za-z_][A-Za-z0-9_]*)["']?(?:\s+UNINDEXED)?/i);
       if (!m) continue;
-      cols.push({ name: m[1], indexed: !/UNINDEXED/i.test(line) });
+      cols.push({ name: m[1]!, indexed: !/UNINDEXED/i.test(line) });
     }
     const INT_COLS = new Set(["file_index", "line_no"]);
     const defs = cols.map(
@@ -357,7 +357,7 @@ function fixGroupBy(sql: string): string {
     // Strip a trailing alias; the alias itself counts as grouped (GROUP BY key).
     const aliasMatch = item.match(/\s+AS\s+["']?([\w]+)["']?\s*$/i);
     const expr = (aliasMatch ? item.slice(0, aliasMatch.index) : item).trim();
-    if (aliasMatch && grouped.has(aliasMatch[1].toLowerCase())) continue;
+    if (aliasMatch && grouped.has(aliasMatch[1]!.toLowerCase())) continue;
     // Only bare column references (optionally table-qualified).
     if (!/^["']?[\w]+["']?(?:\.["']?[\w]+["']?)?$/.test(expr)) continue;
     const bare = expr.replace(/["']/g, "").toLowerCase();
@@ -463,9 +463,9 @@ function translateScalarMax(sql: string): string {
       i = stop;
       continue;
     }
-    if (/[A-Za-z_]/.test(ch)) {
+    if (/[A-Za-z_]/.test(ch!)) {
       let j = i;
-      while (j < n && /[A-Za-z0-9_]/.test(sql[j])) j += 1;
+      while (j < n && /[A-Za-z0-9_]/.test(sql[j]!)) j += 1;
       const word = sql.slice(i, j);
       if (/^max$/i.test(word) && sql[j] === "(") {
         // Balanced close paren, quote aware.
@@ -570,9 +570,9 @@ function qualifyUpsertSetColumns(sql: string): string {
       atAssignStart = false;
       continue;
     }
-    if (/[A-Za-z_]/.test(ch)) {
+    if (/[A-Za-z_]/.test(ch!)) {
       let j = i;
-      while (j < n && /[A-Za-z0-9_]/.test(region[j])) j += 1;
+      while (j < n && /[A-Za-z0-9_]/.test(region[j]!)) j += 1;
       const word = region.slice(i, j);
       const nextSig = region.slice(j).match(/^\s*(.)/)?.[1] ?? "";
       const followedByParen = nextSig === "(";
@@ -593,7 +593,7 @@ function qualifyUpsertSetColumns(sql: string): string {
     if (ch === "(" || ch === ")") {
       out += ch;
       atAssignStart = false;
-      prevSig = ch;
+      prevSig = ch!;
       i += 1;
       continue;
     }
@@ -610,7 +610,7 @@ function qualifyUpsertSetColumns(sql: string): string {
       prevSig = "=";
     } else if (ch !== " " && ch !== "\n" && ch !== "\t" && ch !== "\r") {
       atAssignStart = false;
-      prevSig = ch;
+      prevSig = ch!;
     }
     i += 1;
   }
@@ -650,8 +650,8 @@ export function translateStatement(sql: string, ctx: TranslateCtx): string | nul
   // INSERT OR REPLACE / OR IGNORE
   const orMatch = s.match(/^INSERT\s+OR\s+(REPLACE|IGNORE)\s+INTO\s+(["']?)([A-Za-z_][A-Za-z0-9_]*)\2\s*\(/i);
   if (orMatch) {
-    const verb = orMatch[1].toUpperCase();
-    const table = orMatch[3];
+    const verb = orMatch[1]!.toUpperCase();
+    const table = orMatch[3]!;
     const parsed = parseInsert(s);
     if (!parsed) throw new Error(`pg-shim: cannot parse INSERT for ${table}: ${s.slice(0, 120)}`);
     if (verb === "IGNORE") {

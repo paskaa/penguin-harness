@@ -26,6 +26,7 @@ import type {
   ServerEvent,
 } from "../../api/types.js";
 import type { AppEnv } from "../../auth/middleware.js";
+import { invalidateUsageCache } from "./usage-cache.js";
 import { badRequest, pathParam, readJson, requireString, requireValidId } from "../validate.js";
 import { HttpError } from "../errors.js";
 import { isHttpUrl } from "../../services/protocol-detect.js";
@@ -81,6 +82,9 @@ export function modelConfigChanged(deps: ModelsRouteDeps, projectId: string): vo
   deps.manager.invalidateProjectRuntimes(projectId);
   publishCredentialsUpdated(deps, projectId);
   void deps.machines.syncConfigEverywhere(projectId);
+  // A write here can move a PRICE (an edited row, a restored preset table, a promotion):
+  // the Cost center's cached reads carry costs, so they must not outlive it.
+  invalidateUsageCache(projectId);
 }
 
 /** Validate a paired reference object ({ provider, modelId }); shape mismatch throws 400. */
