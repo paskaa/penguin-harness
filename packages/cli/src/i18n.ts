@@ -416,6 +416,8 @@ export interface Messages {
     workflowAdvanceDesc: string;
     workflowApproveDesc: string;
     wfCommentOpt: string;
+    wfForceOpt: string;
+    wfForceNeedsComment(): string;
     workflowApproved(instanceId: string, stage: string): string;
     workflowDigestDesc: string;
     wfDateOpt: string;
@@ -1624,7 +1626,9 @@ const en: Messages = {
     workflowShowDesc: "Show an instance: stages, gates, attachments and timeline",
     workflowStartDesc: "Start an instance for one business key (idempotent per key)",
     workflowAdvanceDesc: "Advance to the next stage (exit gates must hold; --skip bypasses one)",
-    workflowApproveDesc: "Audit the current stage (required before advancing it)",
+    workflowApproveDesc: "Audit the current stage with AI (required before advancing it; --force records a human override)",
+    wfForceOpt: "Record a human override instead of the AI audit (needs --comment)",
+    wfForceNeedsComment: () => "--force needs --comment: an override without a verdict is not an audit.",
     wfCommentOpt: "Approval comment",
     workflowApproved: (instanceId, stage) => `Instance ${instanceId} approved at ${stage}.`,
     workflowDigestDesc: "Show one day's digest (default yesterday; quiet days print one line)",
@@ -2927,7 +2931,9 @@ const zh: Messages = {
     workflowShowDesc: "查看实例：阶段、门禁、挂单与时间线",
     workflowStartDesc: "为一个业务键发起实例（同键重复发起回到已有实例）",
     workflowAdvanceDesc: "推进到下一阶段（准出门须满足；--skip 跳过一阶段）",
-    workflowApproveDesc: "审核当前阶段（推进前必须先审核）",
+    workflowApproveDesc: "用 AI 审核当前阶段（推进前必须先审核；--force 记人工覆盖）",
+    wfForceOpt: "跳过 AI 审核记人工覆盖（须配 --comment）",
+    wfForceNeedsComment: () => "--force 须配 --comment：没有意见的覆盖不是审核。",
     wfCommentOpt: "审核意见",
     workflowApproved: (instanceId, stage) => `实例 ${instanceId} 已在 ${stage} 审核通过。`,
     workflowDigestDesc: "看某天的日报（默认昨天；安静的日子只打印一行）",

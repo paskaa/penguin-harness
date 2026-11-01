@@ -328,6 +328,9 @@ describe("organization routes", () => {
     ).toBe(400);
     expect((await owner.get(`${base}/acme/workflows/bidding-v1/yaml`)).status).toBe(200);
     expect(calls.map((c) => c.method)).toContain("approveWorkflowInstance");
+    expect(
+      (await owner.post(`${base}/acme/workflow-instances/${id}/approve`, { force: true })).status,
+    ).toBe(200);
   });
 
 

@@ -2905,12 +2905,12 @@ export const getOrgWorkflowDigest = (projectId: string, orgId: string, date?: st
     `${orgBase(projectId, orgId)}/workflow-digest${date ? `?date=${encodeURIComponent(date)}` : ""}`,
   );
 
-/** Audit the current stage (required before leaving it). */
+/** Audit the current stage (AI by default; force records a human override). */
 export const approveOrgWorkflowInstance = (
   projectId: string,
   orgId: string,
   instanceId: string,
-  body: { comment?: string } = {},
+  body: { comment?: string; force?: boolean } = {},
 ) => instanceAction<WorkflowInstanceDetail>(projectId, orgId, instanceId, "approve", body);
 
 /** Raw YAML of a definition, for the maintenance editor. */
@@ -2919,16 +2919,16 @@ export const getOrgWorkflowYaml = (projectId: string, orgId: string, wfId: strin
     `${orgBase(projectId, orgId)}/workflows/${encodeURIComponent(wfId)}/yaml`,
   );
 
-/** Write a new definition version (must move forward). */
+/** Write a new definition version (must move forward): YAML text or the editor's object form. */
 export const putOrgWorkflowDefinition = (
   projectId: string,
   orgId: string,
   wfId: string,
-  yaml: string,
+  input: { yaml?: string; definition?: unknown },
 ) =>
   apiFetch<WorkflowDefinition>(
     `${orgBase(projectId, orgId)}/workflows/${encodeURIComponent(wfId)}`,
-    { method: "PUT", body: { yaml } },
+    { method: "PUT", body: input },
   );
 
 /** `…/workflow-instances/:instanceId/<action>` POST helper shared by the instance transitions. */

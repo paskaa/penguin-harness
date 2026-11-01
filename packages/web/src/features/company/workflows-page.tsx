@@ -10,10 +10,12 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import type {
+  WorkflowDefinition,
   WorkflowDefinitionItem,
   WorkflowInstanceDetail,
   WorkflowInstanceItem,
   WorkflowStage,
+  WorkflowStageGate,
 } from "@prismshadow/penguin-server/api";
 import {
   Button,
@@ -290,14 +292,14 @@ export function WorkflowsPage() {
               STR().attachedOne,
             )
           }
-          onApprove={(comment) =>
+          onApprove={(comment, force) =>
             mutate(
               () =>
                 api.approveOrgWorkflowInstance(
                   projectId,
                   orgId,
                   openId,
-                  comment ? { comment } : {},
+                  { ...(comment ? { comment } : {}), ...(force === true ? { force: true } : {}) },
                 ),
               STR().approved,
             )
@@ -397,25 +399,52 @@ function MaintainDialog(props: {
   onClose: () => void;
   onSaved: () => Promise<void>;
 }) {
-  const [yaml, setYaml] = useState<string | null>(null);
-  const [version, setVersion] = useState("");
+  const [doc, setDoc] = useState<WorkflowDefinition | null>(null);
+  const [sel, setSel] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     if (props.def === null) return;
     api
-      .getOrgWorkflowYaml(props.projectId, props.orgId, props.def.id)
-      .then((y) => {
-        setYaml(y.yaml);
-        setVersion(String(y.version + 1));
+      .getOrgWorkflow(props.projectId, props.orgId, props.def.id)
+      .then((d) => {
+        setDoc({ ...d, version: d.version + 1 });
+        setSel(0);
       })
       .catch((err: unknown) => setError(apiErrorText(err)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.def?.id]);
-  const bumped = (text: string, v: number): string =>
-    text.replace(/^version:\s*\d+/m, `version: ${v}`);
+  const patch = (fn: (d: WorkflowDefinition) => WorkflowDefinition) =>
+    setDoc((d) => (d === null ? d : fn({ ...d, stages: d.stages.map((s) => ({ ...s })) })));
+  const stage = doc?.stages[sel] ?? null;
+  const patchStage = (fn: (s: WorkflowStage) => WorkflowStage) =>
+    patch((d) => {
+      const stages = [...d.stages];
+      const cur = stages[sel];
+      if (cur) stages[sel] = fn({ ...cur });
+      return { ...d, stages };
+    });
+  const moveStage = (delta: -1 | 1) => {
+    if (!doc) return;
+    const j = sel + delta;
+    if (j < 0 || j >= doc.stages.length) return;
+    const cur = doc.stages[sel];
+    if (!cur) return;
+    patch((d) => {
+      const stages = [...d.stages];
+      stages.splice(sel, 1);
+      stages.splice(j, 0, cur);
+      return { ...d, stages };
+    });
+    setSel(j);
+  };
   return (
-    <Modal open onClose={props.onClose} title={S.workflows.maintainTitle(props.def?.name ?? "")}>
+    <Modal
+      open
+      onClose={props.onClose}
+      title={S.workflows.maintainTitle(props.def?.name ?? "")}
+      widthClass="sm:max-w-4xl"
+    >
       <div className="flex flex-col gap-3">
         {props.def && props.def.historyVersions.length > 0 && (
           <div className="text-sm text-gray-500">
@@ -423,41 +452,192 @@ function MaintainDialog(props: {
           </div>
         )}
         {error && <Notice tone="danger">{error}</Notice>}
-        {yaml === null && error === null ? (
+        {doc === null && error === null ? (
           <Skeleton />
-        ) : (
+        ) : doc === null ? null : (
           <>
-            <label className="flex flex-col gap-1 text-sm">
-              {S.workflows.yamlLabel}
-              <Textarea
-                value={yaml ?? ""}
-                onChange={(e) => setYaml(e.target.value)}
-                rows={14}
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-sm">
-              {S.workflows.versionLabel}
-              <Input value={version} onChange={(e) => setVersion(e.target.value)} />
-            </label>
+            <div className="grid grid-cols-2 gap-2">
+              <label className="flex flex-col gap-1 text-sm">
+                {S.workflows.defName}
+                <Input value={doc.name} onChange={(e) => patch((d) => ({ ...d, name: e.target.value }))} />
+              </label>
+              <label className="flex flex-col gap-1 text-sm">
+                {S.workflows.versionLabel}
+                <Input
+                  value={String(doc.version)}
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    if (Number.isInteger(v)) patch((d) => ({ ...d, version: v }));
+                  }}
+                />
+              </label>
+              <label className="col-span-2 flex flex-col gap-1 text-sm">
+                {S.workflows.descLabel}
+                <Input
+                  value={doc.description}
+                  onChange={(e) => patch((d) => ({ ...d, description: e.target.value }))}
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-sm">
+                {S.workflows.bizPrefixLabel}
+                <Input
+                  value={doc.bizKeyPrefix}
+                  onChange={(e) => patch((d) => ({ ...d, bizKeyPrefix: e.target.value }))}
+                />
+              </label>
+              <div className="flex items-end">
+                <Button
+                  variant="ghost"
+                  onClick={() => {
+                    patch((d) => ({
+                      ...d,
+                      stages: [
+                        ...d.stages,
+                        { key: `stage${d.stages.length + 1}`, name: S.workflows.newStage, ownerRole: "", entries: [], exits: [] },
+                      ],
+                    }));
+                    setSel(doc.stages.length);
+                  }}
+                >
+                  {S.workflows.addStage}
+                </Button>
+              </div>
+            </div>
+            <div className="flex gap-3">
+              <ol className="flex w-56 shrink-0 flex-col gap-1" aria-label={S.workflows.stageChain}>
+                {doc.stages.map((s, i) => (
+                  <li key={`${s.key}-${i}`}>
+                    <button
+                      type="button"
+                      onClick={() => setSel(i)}
+                      aria-pressed={sel === i}
+                      className={`flex w-full items-center gap-2 rounded-md border p-2 text-left text-sm ${
+                        sel === i ? "border-blue-500" : "border-gray-200 dark:border-gray-700"
+                      }`}
+                    >
+                      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gray-100 text-xs dark:bg-gray-700">
+                        {i + 1}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate font-medium">{s.name || s.key}</span>
+                        <span className="block truncate text-xs text-gray-500">
+                          {s.key}
+                          {s.ownerRole ? ` · ${s.ownerRole}` : ""}
+                          {(s.parallelWith?.length ?? 0) > 0 ? ` · ${S.workflows.parallelMark}` : ""}
+                          {s.skipWhen ? ` · ${S.workflows.skipMark}` : ""}
+                        </span>
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ol>
+              <div className="flex min-w-0 flex-1 flex-col gap-2">
+                {stage === null ? (
+                  <Notice tone="info">{S.workflows.noStages}</Notice>
+                ) : (
+                  <>
+                    <div className="grid grid-cols-2 gap-2">
+                      <label className="flex flex-col gap-1 text-sm">
+                        {S.workflows.stageKey}
+                        <Input value={stage.key} onChange={(e) => patchStage((s) => ({ ...s, key: e.target.value }))} />
+                      </label>
+                      <label className="flex flex-col gap-1 text-sm">
+                        {S.workflows.stageName}
+                        <Input value={stage.name} onChange={(e) => patchStage((s) => ({ ...s, name: e.target.value }))} />
+                      </label>
+                      <label className="flex flex-col gap-1 text-sm">
+                        {S.workflows.ownerRole}
+                        <Input
+                          value={stage.ownerRole}
+                          onChange={(e) => patchStage((s) => ({ ...s, ownerRole: e.target.value }))}
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1 text-sm">
+                        {S.workflows.skipWhen}
+                        <Input
+                          value={stage.skipWhen ?? ""}
+                          placeholder={S.workflows.skipWhenHint}
+                          onChange={(e) =>
+                            patchStage((s) => ({
+                              ...s,
+                              ...(e.target.value.trim() === "" ? { skipWhen: undefined } : { skipWhen: e.target.value.trim() }),
+                            }))
+                          }
+                        />
+                      </label>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 text-sm">
+                      <span className="text-gray-500">{S.workflows.parallelWith}</span>
+                      {doc.stages
+                        .filter((_, i) => i !== sel)
+                        .map((s) => (
+                          <label key={s.key} className="flex items-center gap-1">
+                            <input
+                              type="checkbox"
+                              checked={(stage.parallelWith ?? []).includes(s.key)}
+                              onChange={(e) =>
+                                patchStage((cur) => ({
+                                  ...cur,
+                                  parallelWith: e.target.checked
+                                    ? [...(cur.parallelWith ?? []), s.key]
+                                    : (cur.parallelWith ?? []).filter((k) => k !== s.key),
+                                }))
+                              }
+                            />
+                            {s.name || s.key}
+                          </label>
+                        ))}
+                    </div>
+                    <GateEditor
+                      title={S.workflows.entries}
+                      gates={stage.entries}
+                      onChange={(entries) => patchStage((s) => ({ ...s, entries }))}
+                    />
+                    <GateEditor
+                      title={S.workflows.exits}
+                      gates={stage.exits}
+                      onChange={(exits) => patchStage((s) => ({ ...s, exits }))}
+                    />
+                    <div className="flex gap-2">
+                      <Button variant="ghost" disabled={sel === 0} onClick={() => moveStage(-1)}>
+                        {S.workflows.moveUp}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        disabled={sel >= doc.stages.length - 1}
+                        onClick={() => moveStage(1)}
+                      >
+                        {S.workflows.moveDown}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        onClick={() => {
+                          patch((d) => ({ ...d, stages: d.stages.filter((_, i) => i !== sel) }));
+                          setSel(Math.max(0, sel - 1));
+                        }}
+                      >
+                        {S.workflows.deleteStage}
+                      </Button>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
             <div className="flex justify-end gap-2">
               <Button variant="ghost" onClick={props.onClose}>
                 {S.workflows.cancel}
               </Button>
               <Button
-                disabled={yaml === null || busy}
+                disabled={doc === null || busy}
                 onClick={async () => {
+                  if (!doc) return;
                   setBusy(true);
                   setError(null);
                   try {
-                    const v = Number(version);
-                    if (!Number.isInteger(v) || v < 1) throw new Error(S.workflows.badVersion);
-                    await api.putOrgWorkflowDefinition(
-                      props.projectId,
-                      props.orgId,
-                      props.def?.id ?? "",
-                      bumped(yaml ?? "", v),
-                    );
-                    toastSuccess(S.workflows.upgraded(v));
+                    const saved = await api.putOrgWorkflowDefinition(props.projectId, props.orgId, doc.id, {
+                      definition: doc,
+                    });
+                    toastSuccess(S.workflows.upgraded(saved.version));
                     await props.onSaved();
                   } catch (err) {
                     setError(apiErrorText(err));
@@ -473,6 +653,70 @@ function MaintainDialog(props: {
         )}
       </div>
     </Modal>
+  );
+}
+
+function GateEditor(props: {
+  title: string;
+  gates: WorkflowStageGate[];
+  onChange: (gates: WorkflowStageGate[]) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-1 rounded-lg border border-gray-200 p-2 dark:border-gray-700">
+      <div className="flex items-center justify-between text-sm font-medium">
+        <span>{props.title}</span>
+        <Button variant="ghost" onClick={() => props.onChange([...props.gates, { text: "" }])}>
+          {S.workflows.addGate}
+        </Button>
+      </div>
+      {props.gates.length === 0 && (
+        <div className="text-xs text-gray-500">{S.workflows.noGates}</div>
+      )}
+      {props.gates.map((g, i) => (
+        <div key={i} className="grid grid-cols-[1fr_1fr_1fr_auto] items-center gap-1">
+          <Input
+            value={g.text}
+            placeholder={S.workflows.gateTextHint}
+            onChange={(e) =>
+              props.onChange(props.gates.map((x, j) => (j === i ? { ...x, text: e.target.value } : x)))
+            }
+          />
+          <Input
+            value={g.link ?? ""}
+            placeholder={S.workflows.gateLinkHint}
+            onChange={(e) =>
+              props.onChange(
+                props.gates.map((x, j) =>
+                  j === i
+                    ? { ...x, ...(e.target.value.trim() === "" ? { link: undefined } : { link: e.target.value.trim() }) }
+                    : x,
+                ),
+              )
+            }
+          />
+          <Input
+            value={g.ticketPrefix ?? ""}
+            placeholder={S.workflows.gatePrefixHint}
+            onChange={(e) =>
+              props.onChange(
+                props.gates.map((x, j) =>
+                  j === i
+                    ? { ...x, ...(e.target.value.trim() === "" ? { ticketPrefix: undefined } : { ticketPrefix: e.target.value.trim() }) }
+                    : x,
+                ),
+              )
+            }
+          />
+          <Button
+            variant="ghost"
+            aria-label={S.workflows.deleteGate}
+            onClick={() => props.onChange(props.gates.filter((_, j) => j !== i))}
+          >
+            ✕
+          </Button>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -538,13 +782,14 @@ function InstanceDialog(props: {
   onAdvance: (skip?: string) => Promise<void>;
   onReject: (to: string | undefined, reason: string) => Promise<void>;
   onAttach: (ticketId: string) => Promise<void>;
-  onApprove: (comment: string) => Promise<void>;
+  onApprove: (comment: string, force?: boolean) => Promise<void>;
   onNote: (text: string) => Promise<void>;
 }) {
   const [reason, setReason] = useState("");
   const [rejectTo, setRejectTo] = useState("");
   const [ticketId, setTicketId] = useState("");
   const [comment, setComment] = useState("");
+  const [auditing, setAuditing] = useState(false);
   const [note, setNote] = useState("");
   const d = props.detail;
   const approvals = (d?.events ?? []).filter((e) => e.kind === "approved");
@@ -639,13 +884,29 @@ function InstanceDialog(props: {
                 placeholder={S.workflows.commentHint}
               />
               <Button
+                disabled={auditing}
+                onClick={async () => {
+                  setAuditing(true);
+                  try {
+                    await props.onApprove(comment.trim());
+                    setComment("");
+                  } finally {
+                    setAuditing(false);
+                  }
+                }}
+              >
+                {auditing ? S.workflows.aiAuditing : S.workflows.aiApprove}
+              </Button>
+              <Button
                 variant="ghost"
+                disabled={comment.trim() === ""}
+                title={S.workflows.forceHint}
                 onClick={() => {
-                  props.onApprove(comment.trim());
+                  props.onApprove(comment.trim(), true);
                   setComment("");
                 }}
               >
-                {S.workflows.approve}
+                {S.workflows.forceApprove}
               </Button>
             </div>
             {approvals.length > 0 && (

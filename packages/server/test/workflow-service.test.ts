@@ -51,7 +51,13 @@ async function approveAndAdvance(
 describe("workflow service", () => {
   let h: OrgHarness;
   beforeEach(async () => {
-    h = await makeOrgHarness({ nowMs: T0 });
+    // The shared harness wires an AI double that approves everything, so the
+    // everyday flows below exercise the automatic audit; dedicated cases cover
+    // rejection, failure and the human override with their own doubles.
+    h = await makeOrgHarness({
+      nowMs: T0,
+      completeOnce: async () => ({ ok: true, text: '{"decision":"approve","reason":"模型：可以推进"}' }),
+    });
   });
 
   it("walks text-gated stages freely but holds prefixed gates until review", async () => {
@@ -165,13 +171,13 @@ describe("workflow service", () => {
     );
     // Same version: stale. Bad YAML: invalid. Wrong id: mismatch.
     await expect(
-      service.writeWorkflowDefinition(P, ORG, "bidding-v1", seed),
+      service.writeWorkflowDefinition(P, ORG, "bidding-v1", { yaml: seed }),
     ).rejects.toMatchObject({ code: "workflow_version_stale" });
-    await expect(service.writeWorkflowDefinition(P, ORG, "bidding-v1", "not: [valid")).rejects.toMatchObject({
+    await expect(service.writeWorkflowDefinition(P, ORG, "bidding-v1", { yaml: "not: [valid" })).rejects.toMatchObject({
       code: "workflow_invalid",
     });
     await expect(
-      service.writeWorkflowDefinition(P, ORG, "other", "id: bidding-v1\nversion: 9\nname: X\nstages:\n  - {key: alpha, name: A, ownerRole: R}\n"),
+      service.writeWorkflowDefinition(P, ORG, "other", { yaml: "id: bidding-v1\nversion: 9\nname: X\nstages:\n  - {key: alpha, name: A, ownerRole: R}\n" }),
     ).rejects.toMatchObject({ code: "workflow_id_mismatch" });
     // Forward: accepted, old instance flags the mismatch but keeps replaying.
     const yaml = [
@@ -185,13 +191,18 @@ describe("workflow service", () => {
         (s) => `  - {key: ${s.key}, name: ${s.name}, ownerRole: ${s.ownerRole}}`,
       ),
     ].join("\n");
-    const v2 = await service.writeWorkflowDefinition(P, ORG, "bidding-v1", yaml);
+    const v2 = await service.writeWorkflowDefinition(P, ORG, "bidding-v1", { yaml });
     expect(v2.version).toBe(2);
     const defs = await service.workflowDefinitions(P, ORG);
     expect(defs.definitions.find((d) => d.id === "bidding-v1")?.historyVersions).toEqual([1]);
     const raw = await service.workflowDefinitionYaml(P, ORG, "bidding-v1");
     expect(raw.version).toBe(2);
     expect(raw.yaml).toContain("version: 2");
+    await expect(
+      service.writeWorkflowDefinition(P, ORG, "bidding-v1", {
+        definition: { id: "bidding-v1", version: 2, name: "X", description: "", bizKeyPrefix: "", stages: [{ key: "aa", name: "A", ownerRole: "R", entries: [], exits: [] }] },
+      }),
+    ).rejects.toMatchObject({ code: "workflow_version_stale" });
     const detail = await service.workflowInstance(P, ORG, inst.instanceId);
     expect(detail.versionMismatch).toBe(true);
     expect(detail.definitionVersion).toBe(1);
@@ -216,5 +227,72 @@ describe("workflow service", () => {
     const texts = await channelTexts(h);
     const digests = texts.filter((t) => t.includes("【工作流日报 2026-11-01】"));
     expect(digests).toHaveLength(1);
+  });
+});
+
+describe("workflow AI audit", () => {
+  async function harnessWith(
+    completeOnce:
+      | ((projectId: string, prompt: string) => Promise<{ ok: true; text: string } | { ok: false; cause: "no_model" | "failed"; error: string }>)
+      | undefined,
+  ) {
+    const hh = await makeOrgHarness({ nowMs: T0, ...(completeOnce !== undefined ? { completeOnce } : {}) });
+    const { service } = hh;
+    await service.create(P, { orgId: ORG, name: "TenderCo", mission: "把招标做完" }, "alice");
+    const inst = await service.createWorkflowInstance(
+      P,
+      ORG,
+      { definitionId: "bidding-v1", bizKey: "term-ai", title: "AI审核项目" },
+      ACTOR,
+    );
+    return { hh, service, inst };
+  }
+
+  it("prompts with the stage, gates, tickets and history", async () => {
+    let seen = "";
+    const { service, inst } = await harnessWith(async (_p, prompt) => {
+      seen = prompt;
+      return { ok: true, text: '{"decision":"approve","reason":"行"}' };
+    });
+    await service.approveWorkflowInstance(P, ORG, inst.instanceId, { comment: "加急" }, ACTOR);
+    expect(seen).toContain("线索抓取");
+    expect(seen).toContain("加急");
+    expect(seen).toContain("decision");
+  });
+
+  it("records rejections as 400 and failures as 502, never inventing verdicts", async () => {
+    const rej = await harnessWith(async () => ({ ok: true, text: '{"decision":"reject","reason":"缺要点"}' }));
+    await expect(
+      rej.service.approveWorkflowInstance(P, ORG, rej.inst.instanceId, {}, ACTOR),
+    ).rejects.toMatchObject({ code: "workflow_ai_rejected" });
+    const garbage = await harnessWith(async () => ({ ok: true, text: "还行吧" }));
+    await expect(
+      garbage.service.approveWorkflowInstance(P, ORG, garbage.inst.instanceId, {}, ACTOR),
+    ).rejects.toMatchObject({ code: "ai_unavailable" });
+    const down = await harnessWith(async () => ({ ok: false, cause: "failed" as const, error: "timeout" }));
+    await expect(
+      down.service.approveWorkflowInstance(P, ORG, down.inst.instanceId, {}, ACTOR),
+    ).rejects.toMatchObject({ code: "ai_unavailable" });
+    const nomodel = await harnessWith(undefined);
+    await expect(
+      nomodel.service.approveWorkflowInstance(P, ORG, nomodel.inst.instanceId, {}, ACTOR),
+    ).rejects.toMatchObject({ code: "ai_unavailable" });
+  });
+
+  it("takes human overrides with a comment, and refuses comment-less force", async () => {
+    const { service, inst } = await harnessWith(undefined);
+    await expect(
+      service.approveWorkflowInstance(P, ORG, inst.instanceId, { force: true }, ACTOR),
+    ).rejects.toMatchObject({ code: "workflow_force_needs_comment" });
+    const next = await service.approveWorkflowInstance(
+      P,
+      ORG,
+      inst.instanceId,
+      { force: true, comment: "人工确认过" },
+      ACTOR,
+    );
+    expect(next.events.filter((e) => e.kind === "approved")).toHaveLength(1);
+    const advanced = await service.advanceWorkflowInstance(P, ORG, inst.instanceId, {}, ACTOR);
+    expect(advanced.currentStage).toBe("terms");
   });
 });

@@ -1482,13 +1482,19 @@ export function registerOrgCommand(program: Command, t: Messages): void {
     workflow
       .command("approve <instance_id>")
       .description(t.org.workflowApproveDesc)
-      .option("--comment <text>", t.org.wfCommentOpt),
+      .option("--comment <text>", t.org.wfCommentOpt)
+      .option("--force", t.org.wfForceOpt),
     t,
   ).action(async (instanceId: string, opts) => {
     const scope = await orgScope(opts, t);
     if (scope === null) return;
+    if (opts.force === true && opts.comment === undefined) {
+      fail(t, t.org.wfForceNeedsComment());
+      return;
+    }
     const body = {
       ...(opts.comment !== undefined ? { comment: String(opts.comment) } : {}),
+      ...(opts.force === true ? { force: true } : {}),
       ...actorFields(),
     };
     const detail = await scope.client.request<WorkflowInstanceDetail>(

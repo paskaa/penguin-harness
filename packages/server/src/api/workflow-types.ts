@@ -130,8 +130,10 @@ export interface WorkflowInstanceNoteRequest {
 }
 
 export interface WorkflowInstanceApproveRequest {
-  /** Approval comment; optional. */
+  /** Approval comment: context for the AI audit, or the verdict itself when forcing. */
   comment?: string;
+  /** Human override: skip the AI audit and record a manual approval (comment required). */
+  force?: boolean;
 }
 
 export interface WorkflowDefinitionYaml {

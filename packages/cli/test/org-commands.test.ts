@@ -926,6 +926,9 @@ describe("penguin org workflow", () => {
     expect(lastRequest("POST", `/workflow-instances/${ID}/approve`)?.body).toEqual({
       comment: "looks good",
     });
+    expect(await cli(["org", "workflow", "approve", ID, "--comment", "mine", "--force"])).toBe(0);
+    expect(lastRequest("POST", `/workflow-instances/${ID}/approve`)?.body).toMatchObject({ force: true });
+    expect(await cli(["org", "workflow", "approve", ID, "--force"])).toBe(1);
     expect(out()).toContain(t.org.workflowApproved(ID, "capture"));
     expect(await cli(["org", "workflow", "advance", ID])).toBe(0);
     expect(lastRequest("POST", `/workflow-instances/${ID}/advance`)?.body).toEqual({});

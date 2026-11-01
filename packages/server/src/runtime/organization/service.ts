@@ -118,10 +118,14 @@ import {
 import { isValidTimeZone, zonedDate, zonedDayRange } from "../../organization/zoned.js";
 import { BIDDING_V1_YAML } from "../../organization/templates/bidding-v1.js";
 import {
+  buildAuditPrompt,
+  parseAuditVerdict,
   parseWorkflowDefinition,
   renderWorkflowExport,
   replayEvents,
   summarizeWorkflowDay,
+  validateWorkflowDefinition,
+  type AuditContext,
   type WorkflowDefinition,
   type WorkflowInstanceEvent,
   type WorkflowInstanceSnapshot,
@@ -3553,12 +3557,9 @@ export class OrganizationService {
   }
 
   /**
-   * Writes a new version of a definition (YAML text, hand-edit friendly). The id must
-   * match the path and the version must move forward; instances keep replaying on their
-   * own version and report `versionMismatch` until they are re-based by hand.
-   */
-  /**
-   * Audits the current stage: records an `approved` event without moving. `advance`
+   * Audits the current stage. By default the audit is automatic: the project's model
+   * reads the stage, its gates, the proof tickets and recent history, and its verdict
+   * is recorded. `force` with a comment records a human override instead. `advance`
    * requires one such event since entering the stage — every node is an audit node.
    */
   async approveWorkflowInstance(
@@ -3571,38 +3572,104 @@ export class OrganizationService {
     const org = await this.requireOrg(projectId, orgId);
     const wf = this.workflowStore();
     const by = actor.agentId ?? actor.userId;
+    const comment = req.comment?.trim() ? req.comment.trim() : undefined;
+    if (req.force === true && comment === undefined)
+      throw new HttpError(400, "workflow_force_needs_comment", "用人审覆盖须写意见。");
+    // Read first (no lock): the audit itself may take the model's seconds.
+    const pre = await wf.readInstance(org.dir, instanceId);
+    if (pre === null) throw workflowInstanceNotFound(instanceId);
+    const preDef = await wf.readDefinition(org.dir, pre.snapshot.definitionId);
+    if (preDef === null || !preDef.parsed.ok)
+      throw new HttpError(409, "workflow_invalid", "Workflow definition needs repair.");
+    const current = pre.snapshot.currentStage;
+    let event: WorkflowInstanceEvent;
+    if (req.force === true) {
+      event = { kind: "approved", at: "", by, stage: current, reason: comment, text: "manual" };
+    } else {
+      const verdict = await this.aiAuditWorkflow(projectId, org, preDef.parsed.value, pre, current, comment);
+      event = { kind: "approved", at: "", by, stage: current, reason: `AI审核：${verdict}`, text: "ai" };
+    }
     await this.scheduler.withLock(projectId, orgId, async () => {
       const inst = await wf.readInstance(org.dir, instanceId);
       if (inst === null) throw workflowInstanceNotFound(instanceId);
-      const def = await wf.readDefinition(org.dir, inst.snapshot.definitionId);
-      if (def === null || !def.parsed.ok)
-        throw new HttpError(409, "workflow_invalid", "Workflow definition needs repair.");
-      const stages = def.parsed.value.stages.map((s) => s.key);
-      if (!stages.includes(inst.snapshot.currentStage))
-        throw new HttpError(409, "workflow_invalid", "Current stage is gone from the definition.");
+      if (inst.snapshot.currentStage !== current)
+        throw new HttpError(409, "workflow_stage_moved", "阶段在审核中变化了，请重新审核。");
       const at = new Date(this.now()).toISOString();
-      const comment = req.comment?.trim() ? req.comment.trim() : undefined;
-      const event: WorkflowInstanceEvent = {
-        kind: "approved",
-        at,
-        by,
-        stage: inst.snapshot.currentStage,
-        ...(comment !== undefined ? { reason: comment } : {}),
-      };
-      const snap = replayEvents(inst.snapshot, stages, [event]);
-      await wf.appendEvent(org.dir, instanceId, event, snap);
+      const snap = replayEvents(inst.snapshot, [current], [{ ...event, at }]);
+      await wf.appendEvent(org.dir, instanceId, { ...event, at }, snap);
     });
     return this.workflowInstance(projectId, orgId, instanceId);
   }
 
+  /**
+   * One AI audit of a stage: builds the prompt from gates, proof tickets and recent
+   * history, asks the Project's default model, and returns the verdict's reason.
+   * A rejection or an unusable answer throws — never invents a verdict.
+   */
+  private async aiAuditWorkflow(
+    projectId: string,
+    org: LoadedOrg,
+    definition: WorkflowDefinition,
+    inst: { snapshot: WorkflowInstanceSnapshot; events: WorkflowInstanceEvent[] },
+    current: string,
+    comment: string | undefined,
+  ): Promise<string> {
+    const complete = this.deps.completeOnce;
+    if (complete === undefined)
+      throw new HttpError(502, "ai_unavailable", "AI 审核不可用：服务器未接入模型；用人审覆盖请加 force 并写意见。");
+    const stage = definition.stages.find((s) => s.key === current);
+    const tickets: AuditContext["tickets"] = [];
+    for (const id of inst.snapshot.attachments) {
+      const found = await this.deps.store.findTicket(org.dir, id);
+      tickets.push({
+        id,
+        column: found?.column ?? "missing",
+        title: found !== null && found.parsed.ok ? found.parsed.value.title : id,
+      });
+    }
+    const recent = inst.events.slice(-10).map(
+      (e) =>
+        `${e.at.slice(0, 16).replace("T", " ")} ${e.kind}${e.to ? `→${e.to}` : ""}${e.reason ? `：${e.reason.slice(0, 80)}` : ""}`,
+    );
+    const prompt = buildAuditPrompt({
+      definitionName: definition.name,
+      stageName: stage?.name ?? current,
+      ownerRole: stage?.ownerRole ?? "",
+      gates: stage?.exits ?? [],
+      tickets,
+      recent,
+      ...(comment !== undefined ? { comment } : {}),
+    });
+    const res = await complete(projectId, prompt);
+    if (!res.ok)
+      throw new HttpError(502, "ai_unavailable", `AI 审核失败（${res.cause}）：${res.error}；用人审覆盖请加 force 并写意见。`);
+    const verdict = parseAuditVerdict(res.text);
+    if (verdict === null)
+      throw new HttpError(502, "ai_unavailable", "AI 审核没有返回有效结论；重试或用人审覆盖（force+意见）。");
+    if (verdict.decision === "reject")
+      throw new HttpError(400, "workflow_ai_rejected", `AI 审核不通过：${verdict.reason}`);
+    return verdict.reason;
+  }
+
+  /**
+   * Writes a new version of a definition, from YAML text or from the visual editor's
+   * object form (same rules both ways). The id must match the path and the version must
+   * move forward; instances keep replaying on their own version and report
+   * `versionMismatch` until they are re-based by hand.
+   */
   async writeWorkflowDefinition(
     projectId: string,
     orgId: string,
     wfId: string,
-    yaml: string,
+    input: { yaml?: string; definition?: unknown },
   ): Promise<WorkflowDefinition> {
     const org = await this.requireOrg(projectId, orgId);
-    const parsed = parseWorkflowDefinition(yaml);
+    const parsed =
+      input.definition !== undefined
+        ? validateWorkflowDefinition(input.definition)
+        : typeof input.yaml === "string"
+          ? parseWorkflowDefinition(input.yaml)
+          : { ok: false as const, error: "Provide yaml or definition." };
     if (!parsed.ok)
       throw new HttpError(400, "workflow_invalid", `Workflow definition invalid: ${parsed.error}`);
     if (parsed.value.id !== wfId)

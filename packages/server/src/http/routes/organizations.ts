@@ -983,8 +983,18 @@ export function organizationRoutes(deps: OrgRouteDeps): Hono<AppEnv> {
     const wfId = requireWorkflowId(c.req.param("wfId"));
     member(c, projectId);
     const body = await readJson(c);
-    const yaml = requireString(body, "yaml", { minLen: 1, maxLen: 200_000 });
-    return c.json(await deps.orgService.writeWorkflowDefinition(projectId, orgId, wfId, yaml));
+    // YAML text or the visual editor's object form; the service validates both the same way.
+    if (typeof body.yaml === "string" && body.yaml.length > 200_000)
+      throw badRequest("yaml must be at most 200000 characters.");
+    if (body.definition === undefined && typeof body.yaml !== "string")
+      throw badRequest("Provide yaml or definition.");
+    const input =
+      body.definition !== undefined
+        ? { definition: body.definition as unknown }
+        : "yaml" in body && typeof body.yaml === "string"
+          ? { yaml: body.yaml as string }
+          : {};
+    return c.json(await deps.orgService.writeWorkflowDefinition(projectId, orgId, wfId, input));
   });
 
   app.get("/:orgId/workflows/:wfId/yaml", async (c) => {
@@ -1133,12 +1143,16 @@ export function organizationRoutes(deps: OrgRouteDeps): Hono<AppEnv> {
       body.comment === undefined || body.comment === null
         ? undefined
         : requireString(body, "comment", { minLen: 1, maxLen: 2000 });
+    const force = optionalBoolean(body, "force");
     return c.json(
       await deps.orgService.approveWorkflowInstance(
         projectId,
         orgId,
         instanceId,
-        comment === undefined ? {} : { comment },
+        {
+          ...(comment === undefined ? {} : { comment }),
+          ...(force === undefined ? {} : { force }),
+        },
         actorOf(c, body),
       ),
     );

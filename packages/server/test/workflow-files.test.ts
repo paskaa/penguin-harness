@@ -5,7 +5,9 @@
 import fs from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import {
+  buildAuditPrompt,
   initialSnapshot,
+  parseAuditVerdict,
   parseWorkflowDefinition,
   replayEvents,
   serializeWorkflowDefinition,
@@ -49,6 +51,34 @@ describe("summarizeWorkflowDay", () => {
     expect(md).toContain("推进 线索抓取 → 要点解析");
     expect(md).toContain("现处要点解析");
     expect(summarizeWorkflowDay([def], [{ snapshot: snap, events: [] }], "2026-11-03")).toBeNull();
+  });
+});
+
+describe("audit prompt and verdict", () => {
+  it("packs stage, gates, tickets and history; parses verdicts strictly", () => {
+    const prompt = buildAuditPrompt({
+      definitionName: "招投标交付流程",
+      stageName: "响应文件",
+      ownerRole: "标书编写",
+      gates: [{ text: "工单进入评审", ticketPrefix: "resp-" }],
+      tickets: [{ id: "2026-11-01-resp-x", column: "review", title: "响应文件" }],
+      recent: ["2026-11-01 10:00 attached"],
+      comment: "加急",
+    });
+    expect(prompt).toContain("响应文件");
+    expect(prompt).toContain("resp-");
+    expect(prompt).toContain("加急");
+    expect(parseAuditVerdict('{"decision":"approve","reason":"行"}')).toEqual({
+      decision: "approve",
+      reason: "行",
+    });
+    expect(parseAuditVerdict('前言 {"decision":"reject","reason":"缺"} 后记')).toEqual({
+      decision: "reject",
+      reason: "缺",
+    });
+    expect(parseAuditVerdict("还行吧")).toBeNull();
+    expect(parseAuditVerdict('{"decision":"maybe","reason":"x"}')).toBeNull();
+    expect(parseAuditVerdict('{"decision":"approve"}')).toBeNull();
   });
 });
 

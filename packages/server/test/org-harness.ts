@@ -89,6 +89,8 @@ export async function makeOrgHarness(opts: {
   projectId?: string;
   ownerUserId?: string;
   nowMs: number;
+  /** Model double for utility asks (AI audit); absent means no model is wired. */
+  completeOnce?: (projectId: string, prompt: string) => Promise<{ ok: true; text: string } | { ok: false; cause: "no_model" | "failed"; error: string }>;
 }): Promise<OrgHarness> {
   const projectId = opts.projectId ?? "p1";
   const owner = opts.ownerUserId ?? "alice";
@@ -218,6 +220,7 @@ export async function makeOrgHarness(opts: {
     companyModeEnabled: () => flags.companyMode,
     now: () => clock.nowMs,
     log: () => {},
+    ...(opts.completeOnce !== undefined ? { completeOnce: opts.completeOnce } : {}),
   };
   const scheduler = new OrganizationScheduler(deps, { intervalMs: 1_000_000 });
   const service = new OrganizationService(deps, scheduler);

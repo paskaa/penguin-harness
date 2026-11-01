@@ -139,7 +139,12 @@ export function parseWorkflowDefinition(raw: string): ParseResult<WorkflowDefini
   } catch (err) {
     return fail(`Failed to parse workflow YAML: ${err instanceof Error ? err.message : String(err)}`);
   }
-  if (!isRecord(doc)) return fail("Workflow definition is not a YAML mapping");
+  return validateWorkflowDefinition(doc);
+}
+
+/** Same rules over an already-parsed value (the JSON form the visual editor saves). */
+export function validateWorkflowDefinition(doc: unknown): ParseResult<WorkflowDefinition> {
+  if (!isRecord(doc)) return fail("Workflow definition is not a mapping");
   if (typeof doc.id !== "string" || doc.id.trim() === "") return fail("id must be a non-empty string");
   if (typeof doc.version !== "number" || !Number.isInteger(doc.version) || doc.version < 1)
     return fail("version must be a positive integer");
@@ -312,4 +317,64 @@ export function renderWorkflowExport(detail: WorkflowInstanceDetail): string {
   }
   lines.push("");
   return lines.join("\n");
+}
+
+/** What the AI auditor needs: the stage, its gates, the proof tickets, recent history. */
+export interface AuditContext {
+  definitionName: string;
+  stageName: string;
+  ownerRole: string;
+  gates: WorkflowStageGate[];
+  tickets: Array<{ id: string; column: string; title: string }>;
+  recent: string[];
+  comment?: string;
+}
+
+export interface AuditVerdict {
+  decision: "approve" | "reject";
+  reason: string;
+}
+
+/** The prompt one AI audit runs on: everything the auditor may hold against the stage, nothing else. */
+export function buildAuditPrompt(ctx: AuditContext): string {
+  const gates =
+    ctx.gates.length === 0
+      ? "（无准出门）"
+      : ctx.gates
+          .map(
+            (g) =>
+              `- ${g.text}${g.ticketPrefix ? `（需 ${g.ticketPrefix}* 工单进入评审）` : ""}`,
+          )
+          .join("\n");
+  const tickets =
+    ctx.tickets.length === 0
+      ? "（未挂工单）"
+      : ctx.tickets.map((t) => `- ${t.id}（${t.column}）：${t.title}`).join("\n");
+  const recent = ctx.recent.length === 0 ? "（无）" : ctx.recent.join("\n");
+  return [
+    "你是招投标交付流程的阶段审核员。只输出一行 JSON，不要解释。",
+    `实例流程：${ctx.definitionName}`,
+    `当前阶段：${ctx.stageName}（负责人角色：${ctx.ownerRole || "未指定"}）`,
+    `准出门：\n${gates}`,
+    `已挂工单：\n${tickets}`,
+    ...(ctx.comment ? [`补充说明：${ctx.comment}`] : []),
+    `时间线（近况）：\n${recent}`,
+    '标准：前缀门须有对应已挂工单进入评审或完成；无其它硬伤则通过，意见写进 reason。',
+    '只输出：{"decision":"approve","reason":"..."} 或 {"decision":"reject","reason":"..."}。',
+  ].join("\n");
+}
+
+/** Parses the auditor's answer; null when it is not a verdict (never invent one). */
+export function parseAuditVerdict(text: string): AuditVerdict | null {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  try {
+    const v = JSON.parse(text.slice(start, end + 1)) as Partial<AuditVerdict>;
+    if (v.decision !== "approve" && v.decision !== "reject") return null;
+    if (typeof v.reason !== "string" || v.reason.trim() === "") return null;
+    return { decision: v.decision, reason: v.reason.trim().slice(0, 500) };
+  } catch {
+    return null;
+  }
 }
