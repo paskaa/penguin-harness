@@ -354,3 +354,46 @@ release `v0.2.18.1-helian`），全部以 merge 方式跟随上游，不 rebase�
 | Web · 归档/杂项 | 已归档对话页 + 归档回执、模型速度芯片（tok/s）、品牌本地化 |
 
 这些改动在内部实例长期运行验证；`tsc` 归零，换模/健康记忆/日程/用量等关键单测全绿。
+
+### 安装包（Release 资产）
+
+每个与上游同形的 release 资产都是一个**自校验**安装包：外壳是 `install.sh`（Windows 为
+`install.cmd` + `install.ps1`），里面附 `payload.tar.gz` / `payload.zip` 及其 sha256；支持在线安装，
+也支持离线（下载一个文件、解开、运行自带安装器，全程不联网）。
+
+| 资产 | 适用 |
+| --- | --- |
+| `penguin-linux-x64.tar.gz` | Linux x64（随包 Node 24.18） |
+| `penguin-darwin-x64.tar.gz` / `penguin-darwin-arm64.tar.gz` | macOS Intel / Apple Silicon |
+| `penguin-win32-x64.zip` | Windows x64（随包 Node + MinGit，自带 POSIX shell） |
+| `penguin-universal.tar.gz` | 任意平台，不随包运行时，要求系统 Node ≥ 24 |
+| `penguin-browser-extension*.zip` | Chrome 扩展（无法访问商店时「加载已解压」） |
+| `SHA256SUMS` | 全部资产的校验清单 |
+
+```bash
+# 在线安装（默认装到 ~/.penguin）
+curl -fsSL https://github.com/paskaa/penguin-harness/releases/download/v0.2.18.1-helian/penguin-linux-x64.tar.gz \
+  | tar -xz --strip-components=1 -C /tmp/penguin-install && sh /tmp/penguin-install/install.sh
+
+# 离线安装
+tar -xzf penguin-linux-x64.tar.gz -C /tmp/penguin-install
+PENGUIN_ARCHIVE=/tmp/penguin-install/payload.tar.gz sh /tmp/penguin-install/install.sh
+```
+
+安装完 `penguin --version` 即 `v0.2.18`，`penguin web` 起界面（默认 7364）。
+
+> 本版本**暂不提供 `linux-arm64`**：该 payload 需要 arm64 的 `node-pty` 绑定预编译（上游用
+> docker+qemu 现编），本次构建机没有可用的 arm64 构建环境，宁可不发也不发一个终端功能坏掉的包。
+
+### 性能与稳定性对比（实测）
+
+测量环境：本机 Linux x64、Node 24.18、SQLite 存储、`usage_records` 六位数行、2026-11-01 实测。
+
+| 场景 | 优化前 | 现在 | 做法 |
+| --- | --- | --- | --- |
+| 成本中心用量聚合（默认窗口） | 冷查询 **4.6–5.4 s** | 同参数重复读 **6.7 ms**（≈700×） | 用量响应短 TTL 缓存 + 滚动窗口按 30 s 桶量化；改价/换默认/改促销时主动失效，不会显示旧价 |
+| 历史消息（大会话，窗口化） | 全量读取该会话会 `RangeError` 500（曾耗时 130 s→9 min） | `?tailLimit=50` → **260 KB / 39 ms** | Trace 尾部读取 + 分页游标；全量读取是有缺陷的旧路径（见已知问题） |
+| 实时推流 | 服务端缺 `/api/socket` 时：升级请求**挂死无响应**、调用降级、界面「刷新才更新」 | 通道就绪，真实登录态实测**消息回显 2.4 s、内容 13 s**，控制台无 WS 报错 | WebSocket `/api/socket`（cookie 鉴权） |
+| Trace 解析 | 大 Trace 在请求线程里解析，事件循环被占住 | 搬到 `trace-parse-worker`（`parseTraceFileOffLoop`） | 独立 worker + 分片索引 |
+| 侧栏轮询 | 每次轮询重读最新会话分片 | 预热分片（限尺寸、10 分钟一次、每轮 4 个） | `perf(warm)` 限频预热 |
+

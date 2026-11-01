@@ -350,3 +350,37 @@ merge, never rebase.
 
 Verified in production: `tsc` clean; model-health, failover-target, schedules, usage and
 migration suites green; live streaming measured end to end.
+
+### Install packages (Release assets)
+
+Each release asset follows upstream's self-verifying bundle shape: the outer archive holds the
+native installer (`install.sh`, or `install.cmd` + `install.ps1`) beside `payload.tar.gz` /
+`payload.zip` and its checksum — online installs verify and open it, offline installs just run the
+bundled installer.
+
+| Asset | For |
+| --- | --- |
+| `penguin-linux-x64.tar.gz` | Linux x64 (bundled Node 24.18) |
+| `penguin-darwin-x64.tar.gz` / `penguin-darwin-arm64.tar.gz` | macOS Intel / Apple Silicon |
+| `penguin-win32-x64.zip` | Windows x64 (bundled Node + MinGit, so `exec_command` has a POSIX shell) |
+| `penguin-universal.tar.gz` | any platform without a bundled runtime; needs system Node ≥ 24 |
+| `penguin-browser-extension*.zip` | Chrome extension (load unpacked when the store is unreachable) |
+| `SHA256SUMS` | checksums for every asset |
+
+> `linux-arm64` is **not** published in this release: its payload needs an arm64 `node-pty` binding
+> (upstream builds it with docker+qemu), and this build host has no arm64 toolchain. Shipping a
+> package whose terminals silently fail would be worse than not shipping it.
+
+### Performance and stability (measured)
+
+Environment: this host, Linux x64, Node 24.18, SQLite storage, `usage_records` in the six-figure
+range, measured 2026-11-01.
+
+| Scenario | Before | Now | How |
+| --- | --- | --- | --- |
+| Cost-center usage aggregation (default window) | cold query **4.6–5.4 s** | same query repeated **6.7 ms** (≈700×) | short-TTL response cache with 30 s key bucketing; invalidated on any price write, so a stale cost never shows |
+| Long history (large session, windowed) | full read of that session returned 500 (`RangeError`, 130 s → 9 min) | `?tailLimit=50` → **260 KB / 39 ms** | Trace tail reads with a paging cursor; the unwindowed path is the defective legacy route (see known issues) |
+| Live streaming | without `/api/socket`: the upgrade request hangs, calls fall back to HTTP, the UI only updates on reload | channel present; measured end to end with a real sign-in: **message echo 2.4 s, content 13 s**, no WebSocket errors | WebSocket `/api/socket` (cookie auth) |
+| Trace parsing | large Traces parsed on the request thread, blocking the loop | moved to `trace-parse-worker` (`parseTraceFileOffLoop`) | dedicated worker + sharded index |
+| Sidebar polling | newest session shard re-read on every poll | shard warm (size-capped, once per 10 min, 4 per round) | `perf(warm)` throttled warm-up |
+
