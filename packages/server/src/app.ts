@@ -542,38 +542,40 @@ export function createApp(boot: ServerBoot): Hono<AppEnv> {
   return cacheReadOnlyAggregates(app);
 }
 
-// PATCH(jchl254 2026-11-01, C6): read-only aggregates the UI polls. Two mechanisms:
-//   * in-flight merge - sessions/tickets/chart are requested together; one computation.
-//   * stale-while-revalidate - the board's TTL (1.5s) is shorter than the UI's poll interval,
-//     so every poll was a miss and paid the full recompute (~570ms). Past the TTL the cached
-//     body is returned immediately and the refresh runs in the background.
-interface ReadOnlyCacheEntry {
-  at: number;
+// PATCH(jchl254 2026-11-01, C6, option B): in-flight dedup for the read-only aggregates
+// the UI polls. Concurrent identical GETs (the board fires sessions/tickets/chart together)
+// share ONE upstream computation; the shared entry dies with its computation and is never
+// served stale afterwards. There is deliberately no TTL/SWR window: a mutation followed by
+// a poll must read fresh (the routes suite holds the board to immediacy: enable a binding,
+// the next GET shows the mark), so sequential polls recompute. What this keeps from the
+// dist patch is the fan-in collapse; what it drops is serving pre-write bodies.
+interface ReadOnlyDedupEntry {
   body: ArrayBuffer;
   headers: Record<string, string>;
 }
-const READ_ONLY_CACHE_RULES: Array<{ re: RegExp; ttl: number; swr: number }> = [
-  { re: /^\/api\/projects\/[^/]+\/agents$/, ttl: 5000, swr: 5000 },
-  // PATCH(jchl254 2026-11-01, C7): the board itself joins the read-only cache.
-  { re: /^\/api\/projects\/[^/]+\/organizations\/[^/]+\/sessions$/, ttl: 1500, swr: 8000 },
-  { re: /^\/api\/projects\/[^/]+\/agents\/[^/]+\/skills$/, ttl: 10000, swr: 10000 },
-  { re: /^\/api\/projects\/[^/]+\/organizations\/[^/]+\/chart$/, ttl: 30000, swr: 30000 },
-  { re: /^\/api\/projects\/[^/]+\/organizations\/[^/]+\/tickets$/, ttl: 10000, swr: 10000 },
-  // PATCH(jchl254 2026-11-01, C9): /usage (pure-read aggregate) and /schedules (file scan)
-  // join too; the key carries url.search because /usage?range=... varies by query.
-  { re: /^\/api\/projects\/[^/]+\/usage$/, ttl: 30000, swr: 30000 },
-  { re: /^\/api\/projects\/[^/]+\/schedules$/, ttl: 5000, swr: 5000 },
+// PATCH(jchl254 2026-11-01, C7, option B): the board joins the dedup scope (in-flight only,
+// never cached past its computation).
+// PATCH(jchl254 2026-11-01, C9, option B): /usage and /schedules join too. The key carries
+// url.search because /usage?range=... varies by query — concurrent polls of different
+// ranges must not share one computation.
+const READ_ONLY_DEDUP_RULES: RegExp[] = [
+  /^\/api\/projects\/[^/]+\/agents$/,
+  /^\/api\/projects\/[^/]+\/organizations\/[^/]+\/sessions$/,
+  /^\/api\/projects\/[^/]+\/agents\/[^/]+\/skills$/,
+  /^\/api\/projects\/[^/]+\/organizations\/[^/]+\/chart$/,
+  /^\/api\/projects\/[^/]+\/organizations\/[^/]+\/tickets$/,
+  /^\/api\/projects\/[^/]+\/usage$/,
+  /^\/api\/projects\/[^/]+\/schedules$/,
 ];
-const readOnlyCache = new Map<string, ReadOnlyCacheEntry>();
-const readOnlyPending = new Map<string, Promise<ReadOnlyCacheEntry | null>>();
+const READ_ONLY_DEDUP_MAX = 128;
+const readOnlyPending = new Map<string, Promise<ReadOnlyDedupEntry | null>>();
 function cacheReadOnlyAggregates(app: Hono<AppEnv>): Hono<AppEnv> {
   type FetchRest = Parameters<typeof app.fetch> extends [Request, ...infer R] ? R : never;
   const orig = app.fetch.bind(app);
   const compute = async (
-    key: string,
     request: Request,
     ...rest: FetchRest
-  ): Promise<ReadOnlyCacheEntry | null> => {
+  ): Promise<ReadOnlyDedupEntry | null> => {
     const res = await orig(request, ...rest);
     if (res.status !== 200) return null;
     const body = await res.arrayBuffer();
@@ -582,42 +584,28 @@ function cacheReadOnlyAggregates(app: Hono<AppEnv>): Hono<AppEnv> {
       if (k === "content-encoding" || k === "content-length" || k === "transfer-encoding") return;
       headers[k] = v;
     });
-    const entry: ReadOnlyCacheEntry = { at: Date.now(), body, headers };
-    readOnlyCache.set(key, entry);
-    if (readOnlyCache.size > 128) {
-      const oldest = readOnlyCache.keys().next().value;
-      if (oldest !== undefined) readOnlyCache.delete(oldest);
-    }
-    return entry;
-  };
-  const start = (
-    key: string,
-    request: Request,
-    ...rest: FetchRest
-  ): Promise<ReadOnlyCacheEntry | null> => {
-    const running = readOnlyPending.get(key);
-    if (running !== undefined) return running;
-    const work = compute(key, request, ...rest).finally(() => readOnlyPending.delete(key));
-    readOnlyPending.set(key, work);
-    return work;
+    return { body, headers };
   };
   app.fetch = (async (request: Request, ...rest: FetchRest) => {
     if (request.method !== "GET") return orig(request, ...rest);
     const url = new URL(request.url);
-    const rule = READ_ONLY_CACHE_RULES.find((r) => r.re.test(url.pathname));
-    if (rule === undefined) return orig(request, ...rest);
+    if (!READ_ONLY_DEDUP_RULES.some((re) => re.test(url.pathname))) {
+      return orig(request, ...rest);
+    }
     const auth = request.headers.get("authorization") ?? request.headers.get("cookie") ?? "";
     const key = `${url.pathname}${url.search}\0${auth}`;
-    const hit = readOnlyCache.get(key);
-    const age = hit === undefined ? Infinity : Date.now() - hit.at;
-    if (hit !== undefined && age < rule.ttl) {
-      return new Response(hit.body, { status: 200, headers: hit.headers });
+    let running = readOnlyPending.get(key);
+    if (running === undefined) {
+      const work = compute(request, ...rest).finally(() => readOnlyPending.delete(key));
+      readOnlyPending.set(key, work);
+      if (readOnlyPending.size > READ_ONLY_DEDUP_MAX) {
+        const oldest = readOnlyPending.keys().next().value;
+        if (oldest !== undefined) readOnlyPending.delete(oldest);
+      }
+      running = work;
     }
-    if (hit !== undefined && age < rule.ttl + rule.swr) {
-      void start(key, request, ...rest).catch(() => {});
-      return new Response(hit.body, { status: 200, headers: hit.headers });
-    }
-    const entry = await start(key, request, ...rest);
+    const entry = await running;
+    // Non-200s are never shared: each waiter reads upstream itself, as without the wrapper.
     if (entry === null) return orig(request, ...rest);
     return new Response(entry.body, { status: 200, headers: entry.headers });
   }) as typeof app.fetch;
