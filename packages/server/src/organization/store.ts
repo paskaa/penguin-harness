@@ -384,6 +384,10 @@ export class OrgStore {
     } catch {
       return out;
     }
+    // PATCH(jchl254 2026-10-31, C2): readdir everything first, then read the files with bounded
+    // concurrency. The sequential version paid two round trips per ticket (147 tickets = 294
+    // awaits) and was 1.8-3.3s of the board's 4s.
+    const jobs: Array<{ colDir: string; column: OrgTicketStatus; name: string }> = [];
     for (const m of months) {
       if (!m.isDirectory() || !MONTH.test(m.name)) continue;
       for (const column of ORG_TICKET_COLUMNS) {
@@ -396,20 +400,30 @@ export class OrgStore {
         }
         for (const f of files) {
           if (!f.isFile() || !f.name.endsWith(".md")) continue;
-          const ticketId = f.name.slice(0, -".md".length);
-          const p = path.join(colDir, f.name);
-          const [raw, stat] = await Promise.all([fs.readFile(p, "utf8"), fs.stat(p)]);
-          out.push({
-            relPath: path.relative(dir, p),
-            ticketId,
-            column,
-            raw,
-            parsed: parseTicket(raw),
-            mtimeMs: stat.mtimeMs,
-          });
+          jobs.push({ colDir, column, name: f.name });
         }
       }
     }
+    const rows = await mapLimit(jobs, 32, async (job) => {
+      const p = path.join(job.colDir, job.name);
+      try {
+        const [raw, stat] = await Promise.all([fs.readFile(p, "utf8"), fs.stat(p)]);
+        return {
+          relPath: path.relative(dir, p),
+          ticketId: job.name.slice(0, -".md".length),
+          column: job.column,
+          raw,
+          parsed: parseTicket(raw),
+          mtimeMs: stat.mtimeMs,
+        } satisfies TicketFile;
+      } catch (err) {
+        // A ticket moved between the readdir and the read: skip it, do not fail the listing.
+        if (err !== null && typeof err === "object" && (err as { code?: unknown }).code === "ENOENT")
+          return null;
+        throw err;
+      }
+    });
+    for (const r of rows) if (r !== null) out.push(r);
     return out.sort((a, b) => a.ticketId.localeCompare(b.ticketId));
   }
 
@@ -622,4 +636,25 @@ export class OrgStore {
     }
     return target;
   }
+}
+
+// PATCH(jchl254 2026-10-31, C2): bounded concurrency for the ticket readdir walk.
+async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T, i: number) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const width = Math.min(limit, items.length);
+  const workers: Promise<void>[] = [];
+  for (let w = 0; w < width; w++) {
+    workers.push(
+      (async () => {
+        for (;;) {
+          const i = next++;
+          if (i >= items.length) return;
+          out[i] = await fn(items[i]!, i);
+        }
+      })(),
+    );
+  }
+  await Promise.all(workers);
+  return out;
 }

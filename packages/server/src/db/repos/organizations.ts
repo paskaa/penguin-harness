@@ -181,12 +181,22 @@ export class OrgCacheRepo implements OrgCache {
           .run(projectId, orgId, existing.ticketId, existing.sessionId);
       }
     }
-    const upsert = this.db.prepare(
-      `INSERT INTO org_ticket_sessions (project_id, org_id, ticket_id, session_id, agent_id)
-       VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(project_id, org_id, ticket_id, session_id) DO UPDATE SET agent_id = excluded.agent_id`,
-    );
-    for (const r of rows) upsert.run(projectId, orgId, r.ticketId, r.sessionId, r.agentId);
+    // PATCH(jchl254 2026-10-31, C2): one statement per 80 rows instead of one per row
+    // (147 tickets = 147 round trips through the shim, ~700ms of the board read).
+    for (let i = 0; i < rows.length; i += 80) {
+      const chunk = rows.slice(i, i + 80);
+      if (chunk.length === 0) continue;
+      const values = chunk.map(() => "(?, ?, ?, ?, ?)").join(", ");
+      const params: string[] = [];
+      for (const r of chunk) params.push(projectId, orgId, r.ticketId, r.sessionId, r.agentId);
+      this.db
+        .prepare(
+          `INSERT INTO org_ticket_sessions (project_id, org_id, ticket_id, session_id, agent_id)
+           VALUES ${values}
+           ON CONFLICT(project_id, org_id, ticket_id, session_id) DO UPDATE SET agent_id = excluded.agent_id`,
+        )
+        .run(...params);
+    }
   }
 
   addTicketSession(
