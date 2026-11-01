@@ -17,7 +17,7 @@ import type { ChannelConfig, TicketDoc } from "../../organization/files.js";
 import { parseChannelMessageLine, serializeChannelMessageLine } from "../../organization/files.js";
 import { agentPrincipal, parsePrincipal, principalAgentId, principalSquadId } from "../../organization/principal.js";
 import { DEFAULT_CHANNEL_ID } from "../../organization/paths.js";
-import type { TicketFile } from "../../organization/store.js";
+import type { TicketFile, TicketFingerprint } from "../../organization/store.js";
 import { zonedDate } from "../../organization/zoned.js";
 import { latestSlotAt, slotInWindow } from "../schedule-file.js";
 import { budgetLine, computeSpend, pausedEmployees } from "./budget.js";
@@ -60,21 +60,32 @@ function recordError(
 }
 
 /** Every ticket file, parsed; an unparsable file is reported and left out, a duplicated id keeps its newest copy (the rest reported). */
-// PATCH(jchl254 2026-11-01, C3): the board polls, and every poll re-read + re-parsed all
-// 147 ticket files (~550ms). Share one walk across a 2s window and across concurrent
-// callers (sessions / tickets / chart ask for the same list within the same tick).
-// PATCH(jchl254 2026-11-01, C4): window widened from 1.5s to 2s, shared with syncCaches.
-// Keyed by org.dir (stable per organization in production, unique per test root in tests):
-// keying by orgId alone leaks one test's listing into the next within the TTL.
-const TICKET_LIST_TTL_MS = 2000;
-const ticketListCache = new Map<string, { at: number; value: TicketListing }>();
+// PATCH(jchl254 2026-11-01, C3, option B): the board polls, and every poll re-read +
+// re-parsed all 147 ticket files (~550ms). Every read still walks the tree, but the walk is
+// the cheap half (readdir + stat, ~6ms); the expensive half (read + parse) runs only when
+// the fingerprint moved. No time window, so no staleness: a hand-edit, a move, a crash
+// duplicate changes a name, an mtime or a size, and the next read re-parses. Concurrent
+// callers (sessions / tickets / chart ask for the same list within the same tick) still
+// share one pipeline through ticketListPending.
+// Keyed by org.dir (stable per organization in production, unique per test root in tests).
+const ticketListCache = new Map<string, { fp: TicketFingerprint[]; value: TicketListing }>();
 const ticketListPending = new Map<string, Promise<TicketListing>>();
+function sameFingerprint(a: readonly TicketFingerprint[], b: readonly TicketFingerprint[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i]!;
+    const y = b[i]!;
+    if (x.relPath !== y.relPath || x.mtimeMs !== y.mtimeMs || x.size !== y.size) return false;
+  }
+  return true;
+}
 export async function listTickets(deps: OrgDeps, org: LoadedOrg): Promise<TicketListing> {
-  const hit = ticketListCache.get(org.dir);
-  if (hit !== undefined && Date.now() - hit.at < TICKET_LIST_TTL_MS) return hit.value;
   const inflight = ticketListPending.get(org.dir);
   if (inflight !== undefined) return inflight;
   const work = (async (): Promise<TicketListing> => {
+  const fp = await deps.store.ticketFingerprint(org.dir);
+  const hit = ticketListCache.get(org.dir);
+  if (hit !== undefined && sameFingerprint(hit.fp, fp)) return hit.value;
   const files = await deps.store.listTickets(org.dir);
   // A crash between moveTicket's write of the new column and its unlink of the old one
   // leaves the id in two columns. Dropping both used to take the ticket off the board
@@ -125,7 +136,7 @@ export async function listTickets(deps: OrgDeps, org: LoadedOrg): Promise<Ticket
     recordError(deps, org, "org_ticket_invalid", `Invalid ticket ${bad.path}: ${bad.error}`);
   }
   const out: TicketListing = { tickets, invalid };
-  ticketListCache.set(org.dir, { at: Date.now(), value: out });
+  ticketListCache.set(org.dir, { fp, value: out });
   if (ticketListCache.size > 64) {
     const oldest = ticketListCache.keys().next().value;
     if (oldest !== undefined) ticketListCache.delete(oldest);

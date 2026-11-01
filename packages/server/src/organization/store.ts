@@ -104,6 +104,18 @@ export interface TicketFile {
   mtimeMs: number;
 }
 
+/**
+ * PATCH(jchl254 2026-11-01, C3, option B): one ticket file's identity for the
+ * self-validating list cache (reconcile.ts): any create, delete, rename, content edit or
+ * crash-duplicate changes the name set, an mtime or a size, so the next read re-parses.
+ */
+export interface TicketFingerprint {
+  /** Path relative to the organization directory. */
+  relPath: string;
+  mtimeMs: number;
+  size: number;
+}
+
 async function readText(p: string): Promise<string | null> {
   try {
     return await fs.readFile(p, "utf8");
@@ -429,6 +441,41 @@ export class OrgStore {
     });
     for (const r of rows) if (r !== null) out.push(r);
     return out.sort((a, b) => a.ticketId.localeCompare(b.ticketId));
+  }
+
+  /**
+   * PATCH(jchl254 2026-11-01, C3, option B): the cheap half of the ticket read — the same
+   * readdir walk as listTickets but stat-only, no readFile/parse (~6ms for 150 files vs
+   * ~550ms for the full read). Sorted by relPath; the caller skips its cached parse while
+   * this matches byte for byte.
+   */
+  async ticketFingerprint(dir: string): Promise<TicketFingerprint[]> {
+    const out: TicketFingerprint[] = [];
+    let months: import("node:fs").Dirent[];
+    try {
+      months = await fs.readdir(ticketsDir(dir), { withFileTypes: true });
+    } catch {
+      return out;
+    }
+    for (const m of months) {
+      if (!m.isDirectory() || !MONTH.test(m.name)) continue;
+      for (const column of ORG_TICKET_COLUMNS) {
+        const colDir = path.join(ticketsDir(dir), m.name, column);
+        let files: import("node:fs").Dirent[];
+        try {
+          files = await fs.readdir(colDir, { withFileTypes: true });
+        } catch {
+          continue;
+        }
+        for (const f of files) {
+          if (!f.isFile() || !f.name.endsWith(".md")) continue;
+          const p = path.join(colDir, f.name);
+          const stat = await fs.stat(p);
+          out.push({ relPath: path.relative(dir, p), mtimeMs: stat.mtimeMs, size: stat.size });
+        }
+      }
+    }
+    return out.sort((a, b) => (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0));
   }
 
   /** Locates a ticket by id: its month is in the id, its column is whichever directory holds it. */
