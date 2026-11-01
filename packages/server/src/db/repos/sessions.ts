@@ -223,7 +223,11 @@ export class SessionsRepo implements SessionIndex {
    */
   markOrgClient(sessionIds: readonly string[]): void {
     const stmt = (n: number): string =>
-      `UPDATE sessions SET client = 'org' WHERE session_id IN (${Array.from({ length: n }, () => "?").join(", ")}) AND client IS NOT 'org'`;
+      // `client <> 'org'` alone would skip NULLs (NULL is never "different" in SQL), and
+      // `IS NOT 'org'` is SQLite-only syntax — PostgreSQL rejects it outright ("syntax error
+      // at or near \"'org'\""), which is how this statement 500'd on every org reconcile
+      // under PENGUIN_DB=pg. The explicit NULL arm says the same thing on both engines.
+      `UPDATE sessions SET client = 'org' WHERE session_id IN (${Array.from({ length: n }, () => "?").join(", ")}) AND (client IS NULL OR client <> 'org')`;
     for (let i = 0; i < sessionIds.length; i += 400) {
       const chunk = sessionIds.slice(i, i + 400);
       this.db.prepare(stmt(chunk.length)).run(...chunk);
