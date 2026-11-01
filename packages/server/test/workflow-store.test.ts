@@ -100,6 +100,29 @@ describe("WorkflowStore", () => {
     expect(reread?.snapshotStale).toBe(true);
   });
 
+  it("accepts digit segments in instance ids (same-day slug collisions end in -2)", async () => {
+    const dir = await orgDir();
+    const wf = new WorkflowStore();
+    const parsed = parseWorkflowDefinition(DEF_YAML);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const snap = await wf.createInstance(
+      dir,
+      "2026-11-01-term-2",
+      parsed.value,
+      "term-2",
+      "第二个同名项目",
+      "alice",
+      "2026-11-01T00:00:00Z",
+    );
+    expect(snap.instanceId).toBe("2026-11-01-term-2");
+    const { isWorkflowInstanceId } = await import("../src/organization/workflow-paths.js");
+    expect(isWorkflowInstanceId("2026-11-01-term-2")).toBe(true);
+    expect((await wf.listInstances(dir)).map((i) => i.instanceId)).toEqual([
+      "2026-11-01-term-2",
+    ]);
+  });
+
   it("returns null for missing instances and skips stray directories", async () => {
     const dir = await orgDir();
     const wf = new WorkflowStore();

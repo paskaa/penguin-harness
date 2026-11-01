@@ -1166,7 +1166,9 @@ export class FakeServer {
         );
         return this.json({ instances });
       }
-      if (!TICKET_ID_RE.test(b)) return this.badRequest("Invalid workflow instance id.");
+      if (!/^\d{4}-\d{2}-\d{2}-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(b)) {
+        return this.badRequest("Invalid workflow instance id.");
+      }
       const rec = org.workflowInstances.get(b);
       if (!rec) {
         return this.error(404, "workflow_instance_not_found", `Workflow instance does not exist: ${b}`);

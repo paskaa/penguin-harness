@@ -37,7 +37,7 @@ export function workflowInstancesDir(dir: string): string {
   return path.join(dir, "instances");
 }
 
-export const WORKFLOW_INSTANCE_ID_PATTERN = /^\d{4}-\d{2}-\d{2}-[a-z]+(?:-[a-z]+)*$/;
+export const WORKFLOW_INSTANCE_ID_PATTERN = /^\d{4}-\d{2}-\d{2}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 export function isWorkflowInstanceId(value: string): boolean {
   return WORKFLOW_INSTANCE_ID_PATTERN.test(value);

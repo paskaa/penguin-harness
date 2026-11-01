@@ -84,7 +84,7 @@ function requireWorkflowId(raw: unknown): string {
   return raw;
 }
 
-/** A workflow instance id in the path: `<yyyy-mm-dd>-<slug>`, the ticket shape. */
+/** A workflow instance id in the path: date + slug segments (digits allowed — unlike ticket ids, whose shape this otherwise follows). */
 function requireWorkflowInstanceId(raw: string | undefined): string {
   if (!raw || !isWorkflowInstanceId(raw)) throw badRequest("Invalid workflow instance id.");
   return raw;
