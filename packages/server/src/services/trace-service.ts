@@ -301,12 +301,6 @@ interface TraceSessionFacts {
   workspace: string;
 }
 
-/** How much parsed shard JSON the history cache keeps (see TraceService.shardCache). */
-const SHARD_CACHE_BYTES = (() => {
-  const raw = Number(process.env.PENGUIN_TRACE_SHARD_CACHE_BYTES ?? "");
-  return Number.isFinite(raw) && raw > 0 ? raw : 256 * 1024 * 1024;
-})();
-
 @Component()
 export class TraceService implements Traces {
   @Use() private readonly paths!: Paths;
@@ -360,15 +354,10 @@ export class TraceService implements Traces {
    * Full-shard read cache: history shards are append-only JSONL, so (size, mtime)
    * validates freshness for free. Serves repeat /messages reads of the same shard
    * (the conversation pane re-reads on every focus) without re-parsing megabytes.
-   * LRU by re-insertion, bounded by BYTES rather than by a shard count: a paging
-   * session walks a whole run of shards per page, and a 40-shard cap thrashed on any
-   * conversation with more than 40 of them — an old `before` page re-parsed every
-   * shard it touched on every request (42 s per page, measured on a 999-shard
-   * Session). Callers get a SHALLOW copy: several splice/sort the array for their own shape.
+   * LRU by re-insertion, capped at 40 shards. Callers get a SHALLOW copy: several
+   * splice/sort the array for their own shape.
    */
   private shardCache = new Map<string, { parsedBytes: number; messages: AmspRecord[] }>();
-  /** Bytes of parsed shard JSON currently held by {@link shardCache}. */
-  private shardCacheBytes = 0;
   // in-flight cold parses keyed by shard path: the web's double-fetch fires two
   // identical reads concurrently; both share ONE worker parse.
   private shardParseInFlight = new Map<string, Promise<AmspRecord[]>>();
@@ -461,21 +450,6 @@ export class TraceService implements Traces {
     }
   }
 
-  /**
-   * Drops least-recently-used shards until {@link shardCache} fits its byte budget.
-   * The budget is a whole page's worth of shards by design — paging a long conversation
-   * must not re-parse the same run on every request.
-   */
-  private evictShardCache(): void {
-    while (this.shardCacheBytes > SHARD_CACHE_BYTES && this.shardCache.size > 1) {
-      const oldest = this.shardCache.keys().next().value;
-      if (oldest === undefined) return;
-      const entry = this.shardCache.get(oldest);
-      this.shardCache.delete(oldest);
-      this.shardCacheBytes -= entry?.parsedBytes ?? 0;
-    }
-  }
-
   private async readShard(
     path: string,
     tailFromEnd?: number,
@@ -516,9 +490,7 @@ export class TraceService implements Traces {
             // re-read (and completed) on the next call, never skipped forever.
             const complete = text.slice(0, lastNL + 1);
             hit.messages.push(...parseTraceLines(complete));
-            const added = Buffer.byteLength(complete, "utf-8");
-            hit.parsedBytes += added;
-            this.shardCacheBytes += added;
+            hit.parsedBytes += Buffer.byteLength(complete, "utf-8");
           }
           // no complete line in the chunk yet: parsedBytes stays put
         } finally {
@@ -541,6 +513,10 @@ export class TraceService implements Traces {
         } catch {
           full = await readTraceTolerant(path);
         }
+        if (this.shardCache.size >= 40) {
+          const oldest = this.shardCache.keys().next().value;
+          if (oldest !== undefined) this.shardCache.delete(oldest);
+        }
         // parsedBytes = offset AFTER the last complete newline: readTraceTolerant tolerates a
         // trailing partial line, but the incremental branch must not skip it forever.
         let parsed = st.size;
@@ -557,11 +533,7 @@ export class TraceService implements Traces {
           const lastNL = t.lastIndexOf("\n");
           parsed = lastNL >= 0 ? parsed - win + lastNL + 1 : 0;
         }
-        const previous = this.shardCache.get(path);
-        if (previous !== undefined) this.shardCacheBytes -= previous.parsedBytes;
         this.shardCache.set(path, { parsedBytes: parsed, messages: full });
-        this.shardCacheBytes += parsed;
-        this.evictShardCache();
         return full;
       })();
       this.shardParseInFlight.set(path, parseP);
