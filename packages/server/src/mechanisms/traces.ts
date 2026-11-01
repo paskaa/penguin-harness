@@ -179,6 +179,16 @@ export abstract class Traces {
     ordinal: number,
     slot: number | undefined,
   ): Promise<{ mime: string; bytes: Buffer }>;
+  /**
+   * Total bytes of a Session's Trace shards (stats only, no reads): the size question the
+   * unwindowed `GET /messages` asks before it decides to answer with a tail window instead of
+   * serializing a transcript V8 cannot hold in one string.
+   */
+  abstract traceBytes(
+    projectId: string,
+    agentId: string,
+    sessionId: string,
+  ): Promise<number>;
   abstract analyze(
     projectId: string,
     agentId: string,

@@ -20,12 +20,28 @@ import { withImagesByReference } from "./trace-images.js";
 import type { MessagesPageRequest } from "./trace-service.js";
 
 export interface SessionHistoryDeps {
-  traceService: Pick<Traces, "readMessages" | "readMessagesPage" | "readTraceImage">;
+  traceService: Pick<Traces, "readMessages" | "readMessagesPage" | "readTraceImage" | "traceBytes">;
   manager: Pick<
     SessionManager,
     "statusOf" | "liveFragments" | "pendingInputs" | "pendingBootstrap"
   >;
   channels: Pick<Channels, "get">;
+}
+
+/**
+ * Trace bytes above which an UNWINDOWED history read is answered with a tail window instead.
+ *
+ * A whole-transcript read of a very large Session used to end in
+ * `RangeError: Invalid string length` (V8 cannot build one string over ~512 MB) after minutes
+ * of work — the largest Session on our install holds ~850 MB of Trace shards. The client always
+ * asks for a window (`tailLimit`); this guard is for everything else (scripts, older clients,
+ * a hand-typed URL), and it answers with what the windowed route already returns: a tail page
+ * plus `page.before`, so the caller can page back instead of getting a 500.
+ */
+/** The guard's threshold; read per call so a deployment (or a test) can set it without a rebuild. */
+function fullReadBytesLimit(): number {
+  const raw = Number(process.env.PENGUIN_MESSAGES_FULL_READ_LIMIT_BYTES ?? "");
+  return Number.isFinite(raw) && raw > 0 ? raw : 64 * 1024 * 1024;
 }
 
 /** Unit-count bounds for windowed history reads (`tailLimit` / `limit`), and the `before` page's default. */
@@ -143,12 +159,24 @@ export async function sessionMessages(
       ...deps.manager.pendingBootstrap(row.sessionId),
     ];
   }
-  if (page !== null) {
+  // An unwindowed read of a Session too large to serialize in one response: serve the tail
+  // page the client would have asked for, and say so in `page` (see FULL_READ_BYTES_LIMIT).
+  let autoWindowed = false;
+  let effectivePage = page;
+  if (page === null) {
+    const bytes = await deps.traceService.traceBytes(row.projectId, row.agentId, row.sessionId);
+    if (bytes > fullReadBytesLimit()) {
+      autoWindowed = true;
+      effectivePage = { kind: "tail", limit: MESSAGES_PAGE_LIMIT_DEFAULT };
+    }
+  }
+
+  if (effectivePage !== null) {
     const result = await deps.traceService.readMessagesPage(
       row.projectId,
       row.agentId,
       row.sessionId,
-      page,
+      effectivePage,
     );
     const info: MessagesPageInfo = {
       ...(result.before !== undefined ? { before: result.before } : {}),
@@ -163,6 +191,7 @@ export async function sessionMessages(
       },
       ...(result.contextModel !== undefined ? { contextModel: result.contextModel } : {}),
       ...(result.agentState !== undefined ? { agentState: result.agentState } : {}),
+      ...(autoWindowed ? { autoWindowed: true } : {}),
     };
     // Images by reference, after the held inputs were merged: the dedup compares raw
     // envelopes, and a held input carries its image inline exactly as its Trace copy does.

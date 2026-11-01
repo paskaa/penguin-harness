@@ -2767,6 +2767,12 @@ export interface MessagesLiveTail {
  */
 export interface MessagesPageInfo {
   /**
+   * The request asked for the WHOLE transcript and the Session's Trace is too large to
+   * serialize in one response, so the answer is a tail window instead of a 500. `before`
+   * pages reach the rest; this flag is what tells such a caller it did not get everything.
+   */
+  autoWindowed?: boolean;
+  /**
    * Cursor of this window's first unit (`<shardIndex>:<ordinal>`): pass it back as
    * `before=` to fetch the previous window. Stable across requests and compaction —
    * rotation opens a NEW shard and closed shards are immutable. Absent = this window

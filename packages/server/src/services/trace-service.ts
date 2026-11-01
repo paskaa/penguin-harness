@@ -614,6 +614,29 @@ export class TraceService implements Traces {
    * emitted; when the child Trace is missing (deleted), the pointer event is kept
    * so API consumers can still know it existed.
    */
+  /**
+   * Total bytes of a Session's Trace shards — one stat per shard, no reads.
+   *
+   * Exists for the unwindowed `GET /messages`: a large Session's whole transcript can exceed
+   * what V8 can serialize into one string (the longest Trace on this install is ~850 MB of
+   * shards, and the full read used to end in `RangeError: Invalid string length` after nine
+   * minutes). The route consults this first and answers such a request with a tail window
+   * instead of reading everything.
+   */
+  async traceBytes(projectId: string, agentId: string, sessionId: string): Promise<number> {
+    const files = await this.locateAll(projectId, agentId, sessionId);
+    let total = 0;
+    for (const file of files) {
+      try {
+        total += (await fs.stat(file.path)).size;
+      } catch {
+        // A shard vanishing between the index read and the stat (rotation cleanup) simply
+        // contributes nothing; the read below reports a real problem itself.
+      }
+    }
+    return total;
+  }
+
   async readMessages(
     projectId: string,
     agentId: string,
