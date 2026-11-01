@@ -60,7 +60,19 @@ function recordError(
 }
 
 /** Every ticket file, parsed; an unparsable file is reported and left out, a duplicated id keeps its newest copy (the rest reported). */
+// PATCH(jchl254 2026-11-01, C3): the board polls, and every poll re-read + re-parsed all
+// 147 ticket files (~550ms). Share one walk across a 2s window and across concurrent
+// callers (sessions / tickets / chart ask for the same list within the same tick).
+// PATCH(jchl254 2026-11-01, C4): window widened from 1.5s to 2s, shared with syncCaches.
+const TICKET_LIST_TTL_MS = 2000;
+const ticketListCache = new Map<string, { at: number; value: TicketListing }>();
+const ticketListPending = new Map<string, Promise<TicketListing>>();
 export async function listTickets(deps: OrgDeps, org: LoadedOrg): Promise<TicketListing> {
+  const hit = ticketListCache.get(org.orgId);
+  if (hit !== undefined && Date.now() - hit.at < TICKET_LIST_TTL_MS) return hit.value;
+  const inflight = ticketListPending.get(org.orgId);
+  if (inflight !== undefined) return inflight;
+  const work = (async (): Promise<TicketListing> => {
   const files = await deps.store.listTickets(org.dir);
   // A crash between moveTicket's write of the new column and its unlink of the old one
   // leaves the id in two columns. Dropping both used to take the ticket off the board
@@ -110,7 +122,20 @@ export async function listTickets(deps: OrgDeps, org: LoadedOrg): Promise<Ticket
   for (const bad of invalid) {
     recordError(deps, org, "org_ticket_invalid", `Invalid ticket ${bad.path}: ${bad.error}`);
   }
-  return { tickets, invalid };
+  const out: TicketListing = { tickets, invalid };
+  ticketListCache.set(org.orgId, { at: Date.now(), value: out });
+  if (ticketListCache.size > 64) {
+    const oldest = ticketListCache.keys().next().value;
+    if (oldest !== undefined) ticketListCache.delete(oldest);
+  }
+  return out;
+  })();
+  ticketListPending.set(org.orgId, work);
+  try {
+    return await work;
+  } finally {
+    ticketListPending.delete(org.orgId);
+  }
 }
 
 /**
@@ -156,6 +181,9 @@ function ownedSessions(
   return { desks, tickets: ticketRows };
 }
 
+// PATCH(jchl254 2026-11-01, C4): throttle companion to the C3 ticket-list cache above.
+const SYNC_CACHES_TTL_MS = 2000;
+const syncCachesAt = new Map<string, number>();
 /**
  * Projects the ledger and the tickets' `sessions` fields into the two session caches, and
  * stamps `client = "org"` on every session row those files name. The caches are rebuilt from
@@ -166,6 +194,16 @@ function ownedSessions(
  * all. Sessions of organizations deleted before then are never seen again and stay unmarked.
  */
 export function syncCaches(deps: OrgDeps, org: LoadedOrg, tickets: readonly LoadedTicket[]): void {
+  // PATCH(jchl254 2026-11-01, C4): this reconciles rows the board just read - the desk ledger,
+  // the ticket-session table and the client stamp. Running it on every poll cost ~200ms of
+  // writes for a result that cannot differ; 2s is well inside the UI's own refresh.
+  const last = syncCachesAt.get(org.orgId);
+  if (last !== undefined && Date.now() - last < SYNC_CACHES_TTL_MS) return;
+  syncCachesAt.set(org.orgId, Date.now());
+  if (syncCachesAt.size > 64) {
+    const oldest = syncCachesAt.keys().next().value;
+    if (oldest !== undefined) syncCachesAt.delete(oldest);
+  }
   syncDeskCache(deps, org);
   const owned = ownedSessions(deps, org, tickets);
   deps.cache.syncTicketSessions(
