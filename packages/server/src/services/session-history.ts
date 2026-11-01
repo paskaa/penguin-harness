@@ -187,7 +187,7 @@ export async function sessionMessages(
 
   if (effectivePage !== null) {
     // PATCH(jchl254 2026-11-01, C8): ... (key/cache declared at module top).
-    const pagedKey = `${row.sessionId} ${row.lastActiveAt ?? ""} ${JSON.stringify(effectivePage)} ${pendingInputs.length}`;
+    const pagedKey = `${row.sessionId}\0${row.lastActiveAt ?? ""}\0${JSON.stringify(effectivePage)}\0${pendingInputs.length}`;
     const pagedHit = pagedMessagesCache.get(pagedKey);
     if (pagedHit !== undefined && Date.now() - pagedHit.at < PAGED_MESSAGES_TTL_MS)
       return c.json(pagedHit.body);
