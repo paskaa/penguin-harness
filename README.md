@@ -413,7 +413,7 @@ range, measured 2026-11-01.
 | Scenario | Before | Now | How |
 | --- | --- | --- | --- |
 | Cost-center usage aggregation (default window) | cold query **4.6–5.4 s** | same query repeated **6.7 ms** (≈700×) | short-TTL response cache with 30 s key bucketing; invalidated on any price write, so a stale cost never shows |
-| Long history (large session, windowed) | full read of that session returned 500 (`RangeError`, 130 s → 9 min) | `?tailLimit=50` → **260 KB / 39 ms** | Trace tail reads with a paging cursor; the unwindowed path is the defective legacy route (see known issues) |
+| Long history (large session, windowed) | full read of that session returned 500 (`RangeError`, 130 s → 9 min) | `?tailLimit=50` → **260 KB / 39 ms**; an unwindowed read of a Session with a >64 MiB Trace now answers with the tail window instead (`page.autoWindowed`, keep paging with `before`) | Trace tail reads with a paging cursor plus a size guard |
 | Live streaming | without `/api/socket`: the upgrade request hangs, calls fall back to HTTP, the UI only updates on reload | channel present; measured end to end with a real sign-in: **message echo 2.4 s, content 13 s**, no WebSocket errors | WebSocket `/api/socket` (cookie auth) |
 | Trace parsing | large Traces parsed on the request thread, blocking the loop | moved to `trace-parse-worker` (`parseTraceFileOffLoop`) | dedicated worker + sharded index |
 | Sidebar polling | newest session shard re-read on every poll | shard warm (size-capped, once per 10 min, 4 per round) | `perf(warm)` throttled warm-up |

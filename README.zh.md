@@ -425,7 +425,7 @@ PENGUIN_ARCHIVE=/tmp/penguin-install/payload.tar.gz sh /tmp/penguin-install/inst
 | 场景 | 优化前 | 现在 | 做法 |
 | --- | --- | --- | --- |
 | 成本中心用量聚合（默认窗口） | 冷查询 **4.6–5.4 s** | 同参数重复读 **6.7 ms**（≈700×） | 用量响应短 TTL 缓存 + 滚动窗口按 30 s 桶量化；改价/换默认/改促销时主动失效，不会显示旧价 |
-| 历史消息（大会话，窗口化） | 全量读取该会话会 `RangeError` 500（曾耗时 130 s→9 min） | `?tailLimit=50` → **260 KB / 39 ms** | Trace 尾部读取 + 分页游标；全量读取是有缺陷的旧路径（见已知问题） |
+| 历史消息（大会话，窗口化） | 全量读取该会话会 `RangeError` 500（曾耗时 130 s→9 min） | `?tailLimit=50` → **260 KB / 39 ms**；不带窗口参数的整段读取在超 64 MiB Trace 上自动改成尾部窗口（`page.autoWindowed`，可继续用 `before` 翻） | Trace 尾部读取 + 分页游标 + 体积守卫 |
 | 实时推流 | 服务端缺 `/api/socket` 时：升级请求**挂死无响应**、调用降级、界面「刷新才更新」 | 通道就绪，真实登录态实测**消息回显 2.4 s、内容 13 s**，控制台无 WS 报错 | WebSocket `/api/socket`（cookie 鉴权） |
 | Trace 解析 | 大 Trace 在请求线程里解析，事件循环被占住 | 搬到 `trace-parse-worker`（`parseTraceFileOffLoop`） | 独立 worker + 分片索引 |
 | 侧栏轮询 | 每次轮询重读最新会话分片 | 预热分片（限尺寸、10 分钟一次、每轮 4 个） | `perf(warm)` 限频预热 |
