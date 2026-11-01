@@ -139,7 +139,12 @@ import {
   employeeLeft,
   systemMessage,
 } from "./notices.js";
-import { appendChannelMessage, listTickets, syncApprovalMode, syncCaches } from "./reconcile.js";
+import {
+  appendChannelMessage,
+  listTickets,
+  syncApprovalMode,
+  syncCachesThrottled,
+} from "./reconcile.js";
 import type { LoadedTicket } from "./reconcile.js";
 import { rotaWarnings } from "./rota.js";
 import { OrganizationScheduler } from "./scheduler.js";
@@ -3066,7 +3071,9 @@ export class OrganizationService {
   async sessions(projectId: string, orgId: string): Promise<OrgSessionsResponse> {
     const org = await this.requireOrg(projectId, orgId);
     const { tickets } = await listTickets(this.deps, org);
-    syncCaches(this.deps, org, tickets);
+    // PATCH(jchl254 2026-11-01, C4, option B): the UI polls this endpoint; the sync it
+    // needs is throttled here, while reconcile passes (and every other caller) sync always.
+    syncCachesThrottled(this.deps, org, tickets);
     const desks: OrgSessionsResponse["desks"] = [];
     const names = await orgEmployeeNames(this.deps, org);
     // PATCH(jchl254 2026-10-31, C1): one read for every desk and ticket session, instead of
