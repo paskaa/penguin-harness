@@ -123,6 +123,21 @@ const IMPORT_SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
  */
 export const MESSAGES_PAGE_MAX_BYTES = 4 * 1024 * 1024;
 
+/**
+ * How many bytes of shards one windowed read may walk before it settles for the units it
+ * already has. The requested `limit` counts UNITS (Task openings), not messages or bytes:
+ * a Session with fewer units than the limit makes the backward walk read the whole
+ * transcript — on the 999-shard Session here (850 MB of shards, most of it inline images)
+ * a `before` page spent 70 s of its 71 s inside that walk to collect 84 units, and the
+ * page it finally assembled was still capped at MESSAGES_PAGE_MAX_BYTES. Stopping by
+ * bytes yields the same page (the byte budget decides it anyway) in a fraction of the time,
+ * and the `before` cursor keeps the rest reachable.
+ */
+const MESSAGES_WALK_MAX_BYTES = (() => {
+  const raw = Number(process.env.PENGUIN_MESSAGES_WALK_MAX_BYTES ?? "");
+  return Number.isFinite(raw) && raw > 0 ? raw : 32 * 1024 * 1024;
+})();
+
 /** Recursion depth cap for sub-session expansion (run_subagent depth is already constrained by the SDK; this is just a defensive backstop against cycles). */
 const MAX_SUBAGENT_DEPTH = 4;
 
@@ -981,7 +996,16 @@ private async resolveChildAgent(
     sessionId: string,
     req: MessagesPageRequest,
   ): Promise<MessagesPageResult> {
+    // Temporary phase profiling (PENGUIN_TRACE_PROFILE=1): a 999-shard Session made a
+    // `before` page take 40-200 s and the split was guesswork — which phase owns it
+    // decides whether the fix is in locating, prefix stats, the backward walk or the
+    // expansion. One line per request, nothing when the flag is off.
+    const prof =
+      process.env.PENGUIN_TRACE_PROFILE === "1"
+        ? { t: performance.now(), locate: 0, prefix: 0, walk: 0, span: 0, shards: 0 }
+        : null;
     const files = await this.locateAll(projectId, agentId, sessionId);
+    if (prof) prof.locate = performance.now() - prof.t;
     const empty = (): MessagesPageResult => ({
       messages: [],
       prior: initialScanState().totals,
@@ -1008,7 +1032,12 @@ private async resolveChildAgent(
       endOrdinal = req.cursor.ordinal;
     }
 
+    const tPrefix = prof ? performance.now() : 0;
     const prefixes = await this.prefixStates(projectId, agentId, sessionId, files, endPos - 1, ctx);
+    if (prof) {
+      prof.prefix = performance.now() - tPrefix;
+      prof.t = performance.now();
+    }
 
     // Walk backward from the end, scanning whole shards (each from its cached carry-in)
     // until the window has more units than requested or the beginning is reached.
@@ -1020,8 +1049,15 @@ private async resolveChildAgent(
     const shardFirstOrdinal = new Map<number, number>();
     let boundaries: Array<{ pos: number; ordinal: number; stats: WindowPriorStats }> = [];
     let startPos = endPos + 1;
+    let walkedBytes = 0;
     while (boundaries.length <= req.limit && startPos > 0) {
       startPos -= 1;
+      walkedBytes += files[startPos]!.sizeBytes;
+      if (walkedBytes > MESSAGES_WALK_MAX_BYTES && boundaries.length > 0) {
+        // Enough for a page: stop here rather than parsing the rest of a huge transcript.
+        startPos += 1;
+        break;
+      }
       // Bounded tail read: the walk stops as soon as the window holds more units than
       // asked for, so a generous multiple of `limit` is always enough. The margin
       // absorbs subagent expansion (one pointer can splice in a whole child history)
@@ -1059,6 +1095,11 @@ private async resolveChildAgent(
         Math.min(to, messages.length),
       );
       boundaries = [...shardBoundaries, ...boundaries];
+    }
+    if (prof) {
+      prof.walk = performance.now() - prof.t;
+      prof.shards = shardMessages.size;
+      prof.t = performance.now();
     }
 
     // The widest window the unit count allows: the last `limit` units, or the very
@@ -1164,8 +1205,21 @@ private async resolveChildAgent(
       start = { pos: 0, ordinal: 0 };
       prior = initialScanState().totals;
     }
+    if (prof) {
+      prof.span = performance.now() - prof.t;
+      prof.t = performance.now();
+    }
     const windowRaw = spanRaw.slice(starts[chosen]?.at ?? 0);
     const expanded = await this.expandMessages(projectId, windowRaw, ctx);
+    if (prof) {
+      // eslint-disable-next-line no-console -- deliberate: a profiling line, gated on the env flag
+      console.log(
+        `[trace-profile] ${sessionId} kind=${req.kind} limit=${req.limit} shards=${prof.shards}/${files.length}` +
+          ` locate=${Math.round(prof.locate)}ms prefix=${Math.round(prof.prefix)}ms` +
+          ` walk=${Math.round(prof.walk)}ms span=${Math.round(prof.span)}ms` +
+          ` expand=${Math.round(performance.now() - prof.t)}ms units=${units.length} msgs=${expanded.length}`,
+      );
+    }
     // The start shard was read for the window above, so its head is on hand.
     const startMeta = shardMessages.get(start.pos)?.find(isSessionMeta);
     return {
