@@ -414,6 +414,12 @@ export interface Messages {
     workflowShowDesc: string;
     workflowStartDesc: string;
     workflowAdvanceDesc: string;
+    workflowApproveDesc: string;
+    wfCommentOpt: string;
+    workflowApproved(instanceId: string, stage: string): string;
+    workflowDigestDesc: string;
+    wfDateOpt: string;
+    workflowQuiet(date: string): string;
     workflowRejectDesc: string;
     workflowAttachDesc: string;
     workflowNoteDesc: string;
@@ -1618,6 +1624,12 @@ const en: Messages = {
     workflowShowDesc: "Show an instance: stages, gates, attachments and timeline",
     workflowStartDesc: "Start an instance for one business key (idempotent per key)",
     workflowAdvanceDesc: "Advance to the next stage (exit gates must hold; --skip bypasses one)",
+    workflowApproveDesc: "Audit the current stage (required before advancing it)",
+    wfCommentOpt: "Approval comment",
+    workflowApproved: (instanceId, stage) => `Instance ${instanceId} approved at ${stage}.`,
+    workflowDigestDesc: "Show one day's digest (default yesterday; quiet days print one line)",
+    wfDateOpt: "UTC day, YYYY-MM-DD",
+    workflowQuiet: (date) => `No workflow activity on ${date}.`,
     workflowRejectDesc: "Send back to an earlier stage with a reason",
     workflowAttachDesc: "Attach an existing ticket as gate proof (the ticket keeps its column)",
     workflowNoteDesc: "Record a note into the instance's event stream",
@@ -2915,6 +2927,12 @@ const zh: Messages = {
     workflowShowDesc: "查看实例：阶段、门禁、挂单与时间线",
     workflowStartDesc: "为一个业务键发起实例（同键重复发起回到已有实例）",
     workflowAdvanceDesc: "推进到下一阶段（准出门须满足；--skip 跳过一阶段）",
+    workflowApproveDesc: "审核当前阶段（推进前必须先审核）",
+    wfCommentOpt: "审核意见",
+    workflowApproved: (instanceId, stage) => `实例 ${instanceId} 已在 ${stage} 审核通过。`,
+    workflowDigestDesc: "看某天的日报（默认昨天；安静的日子只打印一行）",
+    wfDateOpt: "UTC 日期，YYYY-MM-DD",
+    workflowQuiet: (date) => `${date} 没有工作流动态。`,
     workflowRejectDesc: "驳回回早先阶段并给出原因",
     workflowAttachDesc: "挂载已有工单作为门禁证明（工单本身不动）",
     workflowNoteDesc: "往实例事件流记一条备注",

@@ -38,6 +38,16 @@ async function channelTexts(h: OrgHarness): Promise<string[]> {
   return out;
 }
 
+async function approveAndAdvance(
+  h: OrgHarness,
+  instanceId: string,
+  req: { skip?: string } = {},
+) {
+  const { service } = h;
+  await service.approveWorkflowInstance(P, ORG, instanceId, {}, ACTOR);
+  return service.advanceWorkflowInstance(P, ORG, instanceId, req, ACTOR);
+}
+
 describe("workflow service", () => {
   let h: OrgHarness;
   beforeEach(async () => {
@@ -48,13 +58,26 @@ describe("workflow service", () => {
     const { service } = h;
     const inst = await tenderInstance(h);
     expect(inst.currentStage).toBe("capture");
-    // capture → terms → analysis → response: text gates only, no attachments needed.
+    // capture → terms → analysis → response: text gates only, no attachments needed
+    // (each stage still needs its audit first).
     for (const want of ["terms", "analysis", "response"]) {
-      const next = await service.advanceWorkflowInstance(P, ORG, inst.instanceId, {}, ACTOR);
+      const next = await approveAndAdvance(h, inst.instanceId);
       expect(next.currentStage).toBe(want);
       inst.currentStage = want;
     }
+    // Leaving without an audit is refused even where gates would pass.
+    await service.rejectWorkflowInstance(P, ORG, inst.instanceId, { to: "capture", reason: "回" }, ACTOR);
+    await expect(
+      service.advanceWorkflowInstance(P, ORG, inst.instanceId, {}, ACTOR),
+    ).rejects.toMatchObject({ code: "workflow_not_approved" });
+    // Re-walk to response (audits included) for the gate part.
+    for (const want of ["terms", "analysis", "response"]) {
+      const next = await approveAndAdvance(h, inst.instanceId);
+      inst.currentStage = next.currentStage;
+    }
+    expect(inst.currentStage).toBe("response");
     // response → demo needs a resp-* ticket in review: blocked with its link.
+    await service.approveWorkflowInstance(P, ORG, inst.instanceId, {}, ACTOR);
     await expect(
       service.advanceWorkflowInstance(P, ORG, inst.instanceId, {}, ACTOR),
     ).rejects.toMatchObject({ code: "workflow_gate_unmet" });
@@ -65,7 +88,7 @@ describe("workflow service", () => {
       service.advanceWorkflowInstance(P, ORG, inst.instanceId, {}, ACTOR),
     ).rejects.toMatchObject({ code: "workflow_gate_unmet" });
     await service.moveTicket(P, ORG, ticket.ticketId, "review", undefined, ACTOR);
-    const demo = await service.advanceWorkflowInstance(P, ORG, inst.instanceId, {}, ACTOR);
+    const demo = await approveAndAdvance(h, inst.instanceId);
     expect(demo.currentStage).toBe("demo");
     expect(demo.attachments).toContain(ticket.ticketId);
   });
@@ -73,7 +96,7 @@ describe("workflow service", () => {
   it("announces advances and rejects in the all-hands channel", async () => {
     const { service } = h;
     const inst = await tenderInstance(h, "term-7", "大厅广播项目");
-    await service.advanceWorkflowInstance(P, ORG, inst.instanceId, {}, ACTOR);
+    await approveAndAdvance(h, inst.instanceId);
     await service.rejectWorkflowInstance(
       P,
       ORG,
@@ -92,7 +115,7 @@ describe("workflow service", () => {
     const { service } = h;
     const inst = await tenderInstance(h);
     for (let i = 0; i < 3; i++) {
-      const next = await service.advanceWorkflowInstance(P, ORG, inst.instanceId, {}, ACTOR);
+      const next = await approveAndAdvance(h, inst.instanceId);
       inst.currentStage = next.currentStage;
     }
     expect(inst.currentStage).toBe("response");
@@ -100,6 +123,8 @@ describe("workflow service", () => {
     const ticket = await service.createTicket(P, ORG, { title: "响应文件", slug: "resp-doc" }, ACTOR);
     await service.attachWorkflowTicket(P, ORG, inst.instanceId, { ticketId: ticket.ticketId }, ACTOR);
     await service.moveTicket(P, ORG, ticket.ticketId, "review", undefined, ACTOR);
+    // Leaving response still needs its own audit; only demo is bypassed.
+    await service.approveWorkflowInstance(P, ORG, inst.instanceId, {}, ACTOR);
     // Pure-service project: skip demo straight into qa.
     const qa = await service.advanceWorkflowInstance(
       P,
@@ -116,8 +141,22 @@ describe("workflow service", () => {
     expect(exp.markdown).toContain("## 时间线");
   });
 
-  it("upgrades definitions only forward and flags old instances", async () => {
+  it("audits every node: approval is recorded and required to leave", async () => {
     const { service } = h;
+    const inst = await tenderInstance(h);
+    const ok = await service.approveWorkflowInstance(
+      P, ORG, inst.instanceId, { comment: "看过，可以走" }, ACTOR,
+    );
+    expect(ok.events.filter((e) => e.kind === "approved")).toHaveLength(1);
+    const next = await service.advanceWorkflowInstance(P, ORG, inst.instanceId, {}, ACTOR);
+    expect(next.currentStage).toBe("terms");
+    // The approval was consumed by leaving: advancing again needs a fresh one.
+    await expect(
+      service.advanceWorkflowInstance(P, ORG, inst.instanceId, {}, ACTOR),
+    ).rejects.toMatchObject({ code: "workflow_not_approved" });
+  });
+
+  it("upgrades definitions only forward and flags old instances", async () => {    const { service } = h;
     const inst = await tenderInstance(h);
     const v1 = await service.workflowDefinition(P, ORG, "bidding-v1");
     const seed = await fs.readFile(
@@ -148,10 +187,34 @@ describe("workflow service", () => {
     ].join("\n");
     const v2 = await service.writeWorkflowDefinition(P, ORG, "bidding-v1", yaml);
     expect(v2.version).toBe(2);
+    const defs = await service.workflowDefinitions(P, ORG);
+    expect(defs.definitions.find((d) => d.id === "bidding-v1")?.historyVersions).toEqual([1]);
+    const raw = await service.workflowDefinitionYaml(P, ORG, "bidding-v1");
+    expect(raw.version).toBe(2);
+    expect(raw.yaml).toContain("version: 2");
     const detail = await service.workflowInstance(P, ORG, inst.instanceId);
     expect(detail.versionMismatch).toBe(true);
     expect(detail.definitionVersion).toBe(1);
-    const next = await service.advanceWorkflowInstance(P, ORG, inst.instanceId, {}, ACTOR);
+    const next = await approveAndAdvance(h, inst.instanceId);
     expect(next.currentStage).toBe("terms");
+  });
+
+  it("answers digests on demand and posts one daily digest per active day", async () => {
+    const { service, scheduler, clock } = h;
+    const inst = await tenderInstance(h);
+    await approveAndAdvance(h, inst.instanceId);
+    // On demand: the active day renders, a quiet day is null.
+    const hit = await service.workflowDigest(P, ORG, "2026-11-01");
+    expect(hit.date).toBe("2026-11-01");
+    expect(hit.markdown).toContain("【工作流日报 2026-11-01】");
+    const miss = await service.workflowDigest(P, ORG, "2026-10-01");
+    expect(miss.markdown).toBeNull();
+    // Next day the tick posts yesterday's digest exactly once.
+    clock.nowMs = T0 + 26 * 3_600_000;
+    await scheduler.tickOnce();
+    await scheduler.tickOnce();
+    const texts = await channelTexts(h);
+    const digests = texts.filter((t) => t.includes("【工作流日报 2026-11-01】"));
+    expect(digests).toHaveLength(1);
   });
 });

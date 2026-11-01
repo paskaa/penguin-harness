@@ -42,6 +42,9 @@ export function WorkflowsPage() {
   const [pickedDef, setPickedDef] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [maintainId, setMaintainId] = useState<string | null>(null);
+  const [digestOpen, setDigestOpen] = useState(false);
+  const [digest, setDigest] = useState<{ date: string; markdown: string | null } | null>(null);
   const [bizKey, setBizKey] = useState("");
   const [title, setTitle] = useState("");
 
@@ -126,30 +129,49 @@ export function WorkflowsPage() {
         ) : (
           <div className="flex flex-wrap gap-3">
             {defs.map((d) => (
-              <button
+              <div
                 key={d.id}
-                type="button"
-                onClick={() => setPickedDef(d.id)}
-                aria-pressed={pickedDef === d.id}
-                className={`min-w-56 flex-1 rounded-lg border p-4 text-left ${
+                className={`min-w-56 flex-1 rounded-lg border ${
                   pickedDef === d.id ? "border-blue-500" : "border-gray-200 dark:border-gray-700"
                 }`}
               >
-                <div className="font-medium">{d.name}</div>
-                <div className="mt-1 text-sm text-gray-500">
-                  {STR().version(d.version)} · {STR().stageCount(d.stageCount)} ·{" "}
-                  {STR().instanceCount(d.instanceCount)}
+                <button
+                  type="button"
+                  onClick={() => setPickedDef(d.id)}
+                  aria-pressed={pickedDef === d.id}
+                  className="block w-full p-4 text-left"
+                >
+                  <div className="font-medium">{d.name}</div>
+                  <div className="mt-1 text-sm text-gray-500">
+                    {STR().version(d.version)} · {STR().stageCount(d.stageCount)} ·{" "}
+                    {STR().instanceCount(d.instanceCount)}
+                  </div>
+                  {d.description && <div className="mt-1 text-sm">{d.description}</div>}
+                  {d.invalid && <Notice tone="danger">{d.invalid}</Notice>}
+                </button>
+                <div className="flex items-center justify-between px-4 pb-3">
+                  <span className="text-xs text-gray-500">
+                    {d.historyVersions.length > 0
+                      ? STR().history(d.historyVersions.map((v) => `v${v}`).join(" · "))
+                      : ""}
+                  </span>
+                  <Button variant="ghost" onClick={() => setMaintainId(d.id)}>
+                    {STR().maintain}
+                  </Button>
                 </div>
-                {d.description && <div className="mt-1 text-sm">{d.description}</div>}
-                {d.invalid && <Notice tone="danger">{d.invalid}</Notice>}
-              </button>
+              </div>
             ))}
           </div>
         )}
       </section>
 
       <section aria-label={STR().instances} className="flex flex-col gap-3">
-        <h2 className="text-lg font-semibold">{STR().instances}</h2>
+        <div className="mb-1 flex items-center justify-between">
+          <h2 className="text-lg font-semibold">{STR().instances}</h2>
+          <Button variant="ghost" onClick={() => setDigestOpen(true)}>
+            {STR().dailyDigest}
+          </Button>
+        </div>
         {shown.length === 0 ? (
           <Notice tone="info">{STR().noInstances}</Notice>
         ) : (
@@ -208,6 +230,37 @@ export function WorkflowsPage() {
         />
       )}
 
+      {maintainId !== null && (
+        <MaintainDialog
+          projectId={projectId}
+          orgId={orgId}
+          def={defs.find((d) => d.id === maintainId) ?? null}
+          onClose={() => setMaintainId(null)}
+          onSaved={async () => {
+            setMaintainId(null);
+            await refresh();
+          }}
+        />
+      )}
+
+      {digestOpen && (
+        <Modal
+          open
+          onClose={() => {
+            setDigestOpen(false);
+            setDigest(null);
+          }}
+          title={S.workflows.dailyDigest}
+        >
+          <DigestView
+            projectId={projectId}
+            orgId={orgId}
+            digest={digest}
+            setDigest={setDigest}
+          />
+        </Modal>
+      )}
+
       {openId !== null && (
         <InstanceDialog
           detail={detail}
@@ -235,6 +288,18 @@ export function WorkflowsPage() {
             mutate(
               () => api.attachOrgWorkflowTicket(projectId, orgId, openId, { ticketId }),
               STR().attachedOne,
+            )
+          }
+          onApprove={(comment) =>
+            mutate(
+              () =>
+                api.approveOrgWorkflowInstance(
+                  projectId,
+                  orgId,
+                  openId,
+                  comment ? { comment } : {},
+                ),
+              STR().approved,
             )
           }
           onNote={(text) =>
@@ -325,6 +390,137 @@ function CreateInstanceModal(props: {
   );
 }
 
+function MaintainDialog(props: {
+  projectId: string;
+  orgId: string;
+  def: WorkflowDefinitionItem | null;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
+  const [yaml, setYaml] = useState<string | null>(null);
+  const [version, setVersion] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (props.def === null) return;
+    api
+      .getOrgWorkflowYaml(props.projectId, props.orgId, props.def.id)
+      .then((y) => {
+        setYaml(y.yaml);
+        setVersion(String(y.version + 1));
+      })
+      .catch((err: unknown) => setError(apiErrorText(err)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.def?.id]);
+  const bumped = (text: string, v: number): string =>
+    text.replace(/^version:\s*\d+/m, `version: ${v}`);
+  return (
+    <Modal open onClose={props.onClose} title={S.workflows.maintainTitle(props.def?.name ?? "")}>
+      <div className="flex flex-col gap-3">
+        {props.def && props.def.historyVersions.length > 0 && (
+          <div className="text-sm text-gray-500">
+            {S.workflows.history(props.def.historyVersions.map((v) => `v${v}`).join(" · "))}
+          </div>
+        )}
+        {error && <Notice tone="danger">{error}</Notice>}
+        {yaml === null && error === null ? (
+          <Skeleton />
+        ) : (
+          <>
+            <label className="flex flex-col gap-1 text-sm">
+              {S.workflows.yamlLabel}
+              <Textarea
+                value={yaml ?? ""}
+                onChange={(e) => setYaml(e.target.value)}
+                rows={14}
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-sm">
+              {S.workflows.versionLabel}
+              <Input value={version} onChange={(e) => setVersion(e.target.value)} />
+            </label>
+            <div className="flex justify-end gap-2">
+              <Button variant="ghost" onClick={props.onClose}>
+                {S.workflows.cancel}
+              </Button>
+              <Button
+                disabled={yaml === null || busy}
+                onClick={async () => {
+                  setBusy(true);
+                  setError(null);
+                  try {
+                    const v = Number(version);
+                    if (!Number.isInteger(v) || v < 1) throw new Error(S.workflows.badVersion);
+                    await api.putOrgWorkflowDefinition(
+                      props.projectId,
+                      props.orgId,
+                      props.def?.id ?? "",
+                      bumped(yaml ?? "", v),
+                    );
+                    toastSuccess(S.workflows.upgraded(v));
+                    await props.onSaved();
+                  } catch (err) {
+                    setError(apiErrorText(err));
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              >
+                {S.workflows.saveVersion}
+              </Button>
+            </div>
+          </>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+function DigestView(props: {
+  projectId: string;
+  orgId: string;
+  digest: { date: string; markdown: string | null } | null;
+  setDigest: (d: { date: string; markdown: string | null } | null) => void;
+}) {
+  const [date, setDate] = useState("");
+  const [busy, setBusy] = useState(false);
+  const load = async (day: string | undefined) => {
+    setBusy(true);
+    try {
+      props.setDigest(await api.getOrgWorkflowDigest(props.projectId, props.orgId, day));
+    } catch (err) {
+      toastError(apiErrorText(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+  useEffect(() => {
+    if (props.digest === null) void load(undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex gap-2">
+        <Input
+          value={date}
+          onChange={(e) => setDate(e.target.value)}
+          placeholder="2026-11-02"
+        />
+        <Button variant="ghost" disabled={busy} onClick={() => load(date.trim() || undefined)}>
+          {S.workflows.loadDigest}
+        </Button>
+      </div>
+      {props.digest === null ? (
+        <Skeleton />
+      ) : props.digest.markdown === null ? (
+        <Notice tone="info">{S.workflows.noActivity(props.digest.date)}</Notice>
+      ) : (
+        <pre className="whitespace-pre-wrap text-sm">{props.digest.markdown}</pre>
+      )}
+    </div>
+  );
+}
+
 /** Skippable stages the backend accepts from here: the current one and the next one. */
 function skippableNext(d: WorkflowInstanceDetail): WorkflowStage[] {
   const stages = d.definition?.stages ?? [];
@@ -342,13 +538,16 @@ function InstanceDialog(props: {
   onAdvance: (skip?: string) => Promise<void>;
   onReject: (to: string | undefined, reason: string) => Promise<void>;
   onAttach: (ticketId: string) => Promise<void>;
+  onApprove: (comment: string) => Promise<void>;
   onNote: (text: string) => Promise<void>;
 }) {
   const [reason, setReason] = useState("");
   const [rejectTo, setRejectTo] = useState("");
   const [ticketId, setTicketId] = useState("");
+  const [comment, setComment] = useState("");
   const [note, setNote] = useState("");
   const d = props.detail;
+  const approvals = (d?.events ?? []).filter((e) => e.kind === "approved");
   return (
     <Modal open onClose={props.onClose} title={d ? d.title : S.workflows.loading}>
       {!d ? (
@@ -427,6 +626,36 @@ function InstanceDialog(props: {
                 {S.workflows.skip(s.name)}
               </Button>
             ))}
+          </div>
+
+          <div className="flex flex-col gap-2 rounded-lg border border-gray-200 p-3 dark:border-gray-700">
+            <div className="text-sm font-medium">{S.workflows.audit}</div>
+            <div className="flex gap-2">
+              <Input
+                value={comment}
+                onChange={(e) => setComment(e.target.value)}
+                placeholder={S.workflows.commentHint}
+              />
+              <Button
+                variant="ghost"
+                onClick={() => {
+                  props.onApprove(comment.trim());
+                  setComment("");
+                }}
+              >
+                {S.workflows.approve}
+              </Button>
+            </div>
+            {approvals.length > 0 && (
+              <ul className="flex flex-col gap-1 text-sm text-gray-500">
+                {approvals.map((e, i) => (
+                  <li key={`${e.at}-${i}`}>
+                    ✅ {e.stage} · {e.by} · {e.at.slice(0, 16).replace("T", " ")}
+                    {e.reason ? ` · ${e.reason}` : ""}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
 
           <div className="flex flex-col gap-2 rounded-lg border border-gray-200 p-3 dark:border-gray-700">

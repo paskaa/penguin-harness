@@ -1157,6 +1157,13 @@ export class FakeServer {
       });
     }
 
+    if (a === "workflow-digest") {
+      if (method !== "GET") return this.error(404, "not_found", `No fake route for ${method} ${url.pathname}`);
+      const date = url.searchParams.get("date") ?? "2026-09-01";
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return this.badRequest("Invalid date.");
+      return this.json({ date, markdown: `# Digest ${date}\n` });
+    }
+
     if (a === "workflow-instances") {
       if (b === undefined) {
         if (method === "POST") return this.createWorkflowInstance(org, body ?? {});
@@ -1804,6 +1811,10 @@ export class FakeServer {
       }
       case "note": {
         if (!isNonEmptyString(body?.text)) return this.badRequest("text is required.");
+        rec.updatedAt = ORG_NOW;
+        return this.json(rec);
+      }
+      case "approve": {
         rec.updatedAt = ORG_NOW;
         return this.json(rec);
       }

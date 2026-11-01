@@ -121,13 +121,18 @@ import {
   parseWorkflowDefinition,
   renderWorkflowExport,
   replayEvents,
+  summarizeWorkflowDay,
   type WorkflowDefinition,
+  type WorkflowInstanceEvent,
   type WorkflowInstanceSnapshot,
 } from "../../organization/workflow-files.js";
 import { WorkflowStore } from "../../organization/workflow-store.js";
 import type {
+  WorkflowDefinitionYaml,
   WorkflowDefinitionsResponse,
+  WorkflowDigestResponse,
   WorkflowInstanceAdvanceRequest,
+  WorkflowInstanceApproveRequest,
   WorkflowInstanceAttachRequest,
   WorkflowInstanceCreateRequest,
   WorkflowInstanceDetail,
@@ -3177,6 +3182,12 @@ export class OrganizationService {
     ]);
     const counts = new Map<string, number>();
     for (const i of insts) counts.set(i.snapshot.definitionId, (counts.get(i.snapshot.definitionId) ?? 0) + 1);
+    const histories = new Map<string, number[]>();
+    await Promise.all(
+      defs.map(async (d) => {
+        histories.set(d.wfId, await wf.historyVersions(org.dir, d.wfId));
+      }),
+    );
     return {
       definitions: defs.map((d) => ({
         id: d.wfId,
@@ -3185,6 +3196,7 @@ export class OrganizationService {
         description: d.parsed.ok ? d.parsed.value.description : "",
         stageCount: d.parsed.ok ? d.parsed.value.stages.length : 0,
         instanceCount: counts.get(d.wfId) ?? 0,
+        historyVersions: histories.get(d.wfId) ?? [],
         ...(d.parsed.ok ? {} : { invalid: d.parsed.error }),
       })),
     };
@@ -3324,8 +3336,10 @@ export class OrganizationService {
       const cur = inst.snapshot.currentStage;
       // Exit gates of the current stage: skipping the current stage itself bypasses
       // them, skipping a later stage bypasses that stage's — never the current one's.
+      // Same for the audit: leaving a stage needs its approval since entering it.
       if (!(req.skip !== undefined && req.skip === cur)) {
         await this.requireWorkflowGates(org.dir, definition, inst.snapshot, cur);
+        this.requireWorkflowApproved(inst.events, cur);
       }
       const next = this.nextWorkflowStage(definition, cur, req.skip);
       if (next === null)
@@ -3388,6 +3402,26 @@ export class OrganizationService {
     }
     if (unmet.length > 0)
       throw new HttpError(400, "workflow_gate_unmet", `准出门未满足：${unmet.join("；")}`);
+  }
+
+  /**
+   * Every stage is an audit node: leaving it needs an `approved` event recorded after
+   * the event that entered it (creation counts as entering the first stage).
+   */
+  private requireWorkflowApproved(
+    events: WorkflowInstanceEvent[],
+    current: string,
+  ): void {
+    let entry = -1;
+    events.forEach((e, i) => {
+      if (e.kind === "created") entry = i;
+      else if ((e.kind === "advanced" || e.kind === "rejected") && e.to === current) entry = i;
+    });
+    const ok = events
+      .slice(entry + 1)
+      .some((e) => e.kind === "approved" && e.stage === current);
+    if (!ok)
+      throw new HttpError(400, "workflow_not_approved", `该阶段尚未审核通过：先审核当前阶段再推进`);
   }
 
   /** Best-effort notice into the all-hands channel; a failed notice never fails the transition. */
@@ -3523,6 +3557,44 @@ export class OrganizationService {
    * match the path and the version must move forward; instances keep replaying on their
    * own version and report `versionMismatch` until they are re-based by hand.
    */
+  /**
+   * Audits the current stage: records an `approved` event without moving. `advance`
+   * requires one such event since entering the stage — every node is an audit node.
+   */
+  async approveWorkflowInstance(
+    projectId: string,
+    orgId: string,
+    instanceId: string,
+    req: WorkflowInstanceApproveRequest,
+    actor: Actor,
+  ): Promise<WorkflowInstanceDetail> {
+    const org = await this.requireOrg(projectId, orgId);
+    const wf = this.workflowStore();
+    const by = actor.agentId ?? actor.userId;
+    await this.scheduler.withLock(projectId, orgId, async () => {
+      const inst = await wf.readInstance(org.dir, instanceId);
+      if (inst === null) throw workflowInstanceNotFound(instanceId);
+      const def = await wf.readDefinition(org.dir, inst.snapshot.definitionId);
+      if (def === null || !def.parsed.ok)
+        throw new HttpError(409, "workflow_invalid", "Workflow definition needs repair.");
+      const stages = def.parsed.value.stages.map((s) => s.key);
+      if (!stages.includes(inst.snapshot.currentStage))
+        throw new HttpError(409, "workflow_invalid", "Current stage is gone from the definition.");
+      const at = new Date(this.now()).toISOString();
+      const comment = req.comment?.trim() ? req.comment.trim() : undefined;
+      const event: WorkflowInstanceEvent = {
+        kind: "approved",
+        at,
+        by,
+        stage: inst.snapshot.currentStage,
+        ...(comment !== undefined ? { reason: comment } : {}),
+      };
+      const snap = replayEvents(inst.snapshot, stages, [event]);
+      await wf.appendEvent(org.dir, instanceId, event, snap);
+    });
+    return this.workflowInstance(projectId, orgId, instanceId);
+  }
+
   async writeWorkflowDefinition(
     projectId: string,
     orgId: string,
@@ -3553,9 +3625,28 @@ export class OrganizationService {
           "workflow_version_stale",
           `Version ${definition.version} is not newer than v${currentVersion}.`,
         );
+      if (current !== null && current.parsed.ok) {
+        await wf.stashHistory(org.dir, wfId, currentVersion, current.raw);
+      }
       await wf.writeDefinition(org.dir, wfId, definition);
     });
     return definition;
+  }
+
+  /** The raw YAML of a definition, for the maintenance editor. */
+  async workflowDefinitionYaml(
+    projectId: string,
+    orgId: string,
+    wfId: string,
+  ): Promise<WorkflowDefinitionYaml> {
+    const org = await this.requireOrg(projectId, orgId);
+    const wf = this.workflowStore();
+    await this.ensureWorkflowSeed(org.dir);
+    const found = await wf.readDefinition(org.dir, wfId);
+    if (found === null) throw workflowNotFound(wfId);
+    if (!found.parsed.ok)
+      throw new HttpError(409, "workflow_invalid", `Workflow ${wfId} needs repair: ${found.parsed.error}`);
+    return { id: wfId, version: found.parsed.value.version, yaml: found.raw };
   }
 
   async workflowExport(
@@ -3568,6 +3659,30 @@ export class OrganizationService {
       instanceId: detail.instanceId,
       filename: `workflow-${detail.instanceId}.md`,
       markdown: renderWorkflowExport(detail),
+    };
+  }
+
+  /** On-demand digest of one UTC day (default yesterday); null markdown on quiet days. */
+  async workflowDigest(
+    projectId: string,
+    orgId: string,
+    date?: string,
+  ): Promise<WorkflowDigestResponse> {
+    const org = await this.requireOrg(projectId, orgId);
+    const wf = this.workflowStore();
+    await this.ensureWorkflowSeed(org.dir);
+    const target = date ?? new Date(this.now() - 86_400_000).toISOString().slice(0, 10);
+    const [defs, insts] = await Promise.all([
+      wf.listDefinitions(org.dir),
+      wf.listInstances(org.dir),
+    ]);
+    return {
+      date: target,
+      markdown: summarizeWorkflowDay(
+        defs.flatMap((d) => (d.parsed.ok ? [d.parsed.value] : [])),
+        insts,
+        target,
+      ),
     };
   }
 }
@@ -3909,7 +4024,10 @@ export abstract class OrgService extends Interface<
     | "attachWorkflowTicket"
     | "noteWorkflowInstance"
     | "writeWorkflowDefinition"
+    | "workflowDefinitionYaml"
     | "workflowExport"
+    | "workflowDigest"
+    | "approveWorkflowInstance"
     | "listSquads"
     | "squad"
     | "createSquad"

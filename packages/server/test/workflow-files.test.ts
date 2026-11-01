@@ -9,6 +9,7 @@ import {
   parseWorkflowDefinition,
   replayEvents,
   serializeWorkflowDefinition,
+  summarizeWorkflowDay,
 } from "../src/organization/workflow-files.js";
 import { BIDDING_V1_YAML } from "../src/organization/templates/bidding-v1.js";
 
@@ -22,6 +23,32 @@ async function biddingTemplate(): Promise<string> {
 describe("bidding template bundle", () => {
   it("stays identical to the YAML source (the server ships bundled, no file reads)", async () => {
     expect(BIDDING_V1_YAML).toBe(await biddingTemplate());
+  });
+});
+
+describe("summarizeWorkflowDay", () => {
+  it("renders one line per active instance and null on quiet days", async () => {
+    const raw = await biddingTemplate();
+    const parsed = parseWorkflowDefinition(raw);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const def = parsed.value;
+    const base = initialSnapshot("2026-11-02-x", def, "term-1", "放疗项目", "alice", "2026-11-02T00:00:00Z");
+    const stages = def.stages.map((s) => s.key);
+    const snap = replayEvents(base, stages, [
+      { kind: "advanced", at: "2026-11-02T01:00:00Z", by: "alice", from: "capture", to: "terms" },
+      { kind: "note", at: "2026-11-02T02:00:00Z", by: "qa", text: "ok" },
+    ]);
+    const md = summarizeWorkflowDay([def], [{ snapshot: snap, events: [
+      { kind: "created", at: "2026-11-02T00:00:00Z", by: "alice", text: "bidding-v1", reason: "v1" },
+      { kind: "advanced", at: "2026-11-02T01:00:00Z", by: "alice", from: "capture", to: "terms" },
+      { kind: "note", at: "2026-11-02T02:00:00Z", by: "qa", text: "ok" },
+    ] }], "2026-11-02");
+    expect(md).toContain("【工作流日报 2026-11-02】");
+    expect(md).toContain("放疗项目");
+    expect(md).toContain("推进 线索抓取 → 要点解析");
+    expect(md).toContain("现处要点解析");
+    expect(summarizeWorkflowDay([def], [{ snapshot: snap, events: [] }], "2026-11-03")).toBeNull();
   });
 });
 

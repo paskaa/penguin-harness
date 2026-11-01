@@ -922,6 +922,11 @@ describe("penguin org workflow", () => {
 
   it("advance / reject / attach / note post their transitions with the actor", async () => {
     await cli(["org", "workflow", "start", "--definition-id", "bidding-v1", "--biz-key", "term-99", "--title", "T"]);
+    expect(await cli(["org", "workflow", "approve", ID, "--comment", "looks good"])).toBe(0);
+    expect(lastRequest("POST", `/workflow-instances/${ID}/approve`)?.body).toEqual({
+      comment: "looks good",
+    });
+    expect(out()).toContain(t.org.workflowApproved(ID, "capture"));
     expect(await cli(["org", "workflow", "advance", ID])).toBe(0);
     expect(lastRequest("POST", `/workflow-instances/${ID}/advance`)?.body).toEqual({});
     expect(out()).toContain(t.org.workflowAdvanced(ID, "terms"));
@@ -958,6 +963,13 @@ describe("penguin org workflow", () => {
     });
     expect(out()).toContain(t.org.workflowUpgraded("bidding-v1", 2));
     expect(await cli(["org", "workflow", "upgrade", "bidding-v1", "--file", `${tmp}.missing`])).toBe(1);
+  });
+
+  it("digest prints the day's Markdown", async () => {
+    expect(await cli(["org", "workflow", "digest"])).toBe(0);
+    expect(out()).toContain("# Digest 2026-09-01");
+    expect(await cli(["org", "workflow", "digest", "--date", "2026-09-02"])).toBe(0);
+    expect(lastRequest("GET", "/workflow-digest")?.search).toContain("date=2026-09-02");
   });
 });
 

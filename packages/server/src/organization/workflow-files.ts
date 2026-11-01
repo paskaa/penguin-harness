@@ -17,6 +17,54 @@ import type {
 } from "../api/workflow-types.js";
 import type { ParseResult } from "./files.js";
 
+/** First line of every daily digest: the idempotency marker the tick scans for. */
+export function workflowDigestMarker(date: string): string {
+  return `【工作流日报 ${date}】`;
+}
+
+/** An instance with the events the digest reads: the snapshot for names, the stream for facts. */
+export interface DigestInstance {
+  snapshot: WorkflowInstanceSnapshot;
+  events: WorkflowInstanceEvent[];
+}
+
+/**
+ * One Markdown digest of a UTC day's workflow activity, or null when nothing happened
+ * (the tick posts nothing on quiet days — a board that narrates itself daily buries the
+ * channel either way). Pure: definitions resolve stage names, the stream supplies facts.
+ */
+export function summarizeWorkflowDay(
+  definitions: WorkflowDefinition[],
+  instances: DigestInstance[],
+  date: string,
+): string | null {
+  const nameOf = (definitionId: string, key: string): string =>
+    definitions
+      .find((d) => d.id === definitionId)
+      ?.stages.find((s) => s.key === key)?.name ?? key;
+  const lines: string[] = [];
+  for (const { snapshot, events } of instances) {
+    const day = events.filter((e) => e.at.slice(0, 10) === date);
+    if (day.length === 0) continue;
+    const parts: string[] = [];
+    for (const e of day) {
+      if (e.kind === "advanced") parts.push(`推进 ${nameOf(snapshot.definitionId, e.from ?? "")} → ${nameOf(snapshot.definitionId, e.to ?? "")}`);
+      else if (e.kind === "rejected")
+        parts.push(`驳回 ${nameOf(snapshot.definitionId, e.from ?? "")} → ${nameOf(snapshot.definitionId, e.to ?? "")}（${e.reason ?? ""}）`);
+      else if (e.kind === "approved")
+        parts.push(`审核 ${nameOf(snapshot.definitionId, e.stage ?? "")}通过${e.reason ? `（${e.reason}）` : ""}`);
+      else if (e.kind === "attached") parts.push(`挂单 ${e.ticketId ?? ""}`);
+      else if (e.kind === "note") parts.push(`备注 ${e.by}`);
+      else if (e.kind === "created") parts.push("发起");
+    }
+    lines.push(
+      `- ${snapshot.title}（${snapshot.bizKey}）：${parts.join("；")}；现处${nameOf(snapshot.definitionId, snapshot.currentStage)}`,
+    );
+  }
+  if (lines.length === 0) return null;
+  return [workflowDigestMarker(date), ...lines].join("\n");
+}
+
 export type {
   WorkflowDefinition,
   WorkflowInstanceEvent,
@@ -253,6 +301,8 @@ export function renderWorkflowExport(detail: WorkflowInstanceDetail): string {
         ? `推进 ${stageName(e.from ?? "")} → ${stageName(e.to ?? "")}`
         : e.kind === "rejected"
           ? `驳回 ${stageName(e.from ?? "")} → ${stageName(e.to ?? "")}，原因：${e.reason ?? ""}`
+          : e.kind === "approved"
+            ? `审核通过 ${stageName(e.stage ?? "")}${e.reason ? `：${e.reason}` : ""}`
           : e.kind === "attached"
             ? `挂载工单 ${e.ticketId ?? ""}`
             : e.kind === "note"

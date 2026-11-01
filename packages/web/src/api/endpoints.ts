@@ -243,7 +243,9 @@ import type {
   WorkbenchVersion,
   WorkflowDefinition,
   WorkflowDefinitionItem,
+  WorkflowDefinitionYaml,
   WorkflowDefinitionsResponse,
+  WorkflowDigestResponse,
   WorkflowInstanceAdvanceRequest,
   WorkflowInstanceAttachRequest,
   WorkflowInstanceCreateRequest,
@@ -2897,7 +2899,39 @@ export const getOrgWorkflowInstance = (projectId: string, orgId: string, instanc
 export const exportOrgWorkflowInstance = (projectId: string, orgId: string, instanceId: string) =>
   apiFetch<WorkflowInstanceExport>(`${instanceBase(projectId, orgId, instanceId)}/export`);
 
-/** `…/workflow-instances/:instanceId/<action>` POST helper shared by the four transitions. */
+/** One day's digest (default yesterday); null markdown on a quiet day. */
+export const getOrgWorkflowDigest = (projectId: string, orgId: string, date?: string) =>
+  apiFetch<WorkflowDigestResponse>(
+    `${orgBase(projectId, orgId)}/workflow-digest${date ? `?date=${encodeURIComponent(date)}` : ""}`,
+  );
+
+/** Audit the current stage (required before leaving it). */
+export const approveOrgWorkflowInstance = (
+  projectId: string,
+  orgId: string,
+  instanceId: string,
+  body: { comment?: string } = {},
+) => instanceAction<WorkflowInstanceDetail>(projectId, orgId, instanceId, "approve", body);
+
+/** Raw YAML of a definition, for the maintenance editor. */
+export const getOrgWorkflowYaml = (projectId: string, orgId: string, wfId: string) =>
+  apiFetch<WorkflowDefinitionYaml>(
+    `${orgBase(projectId, orgId)}/workflows/${encodeURIComponent(wfId)}/yaml`,
+  );
+
+/** Write a new definition version (must move forward). */
+export const putOrgWorkflowDefinition = (
+  projectId: string,
+  orgId: string,
+  wfId: string,
+  yaml: string,
+) =>
+  apiFetch<WorkflowDefinition>(
+    `${orgBase(projectId, orgId)}/workflows/${encodeURIComponent(wfId)}`,
+    { method: "PUT", body: { yaml } },
+  );
+
+/** `…/workflow-instances/:instanceId/<action>` POST helper shared by the instance transitions. */
 const instanceAction = <T>(
   projectId: string,
   orgId: string,

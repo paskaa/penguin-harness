@@ -32,6 +32,16 @@ export function workflowDefinitionPath(dir: string, wfId: string): string {
   return path.join(workflowsDir(dir), wfId, "definition.yaml");
 }
 
+/** `workflows/<wfId>/history/`: previous raws, `v<version>.yaml`, oldest first by name. */
+export function workflowHistoryDir(dir: string, wfId: string): string {
+  return path.join(workflowsDir(dir), wfId, "history");
+}
+
+/** `workflows/<wfId>/history/v<version>.yaml`: the raw that version replaced. */
+export function workflowHistoryPath(dir: string, wfId: string, version: number): string {
+  return path.join(workflowHistoryDir(dir, wfId), `v${version}.yaml`);
+}
+
 /** `instances/`: one directory per instance id (`<yyyy-mm-dd>-<slug>`). */
 export function workflowInstancesDir(dir: string): string {
   return path.join(dir, "instances");

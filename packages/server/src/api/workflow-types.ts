@@ -10,7 +10,8 @@ export type WorkflowInstanceEventKind =
   | "advanced"
   | "rejected"
   | "attached"
-  | "note";
+  | "note"
+  | "approved";
 
 export interface WorkflowStageGate {
   /** Human-readable exit criterion, e.g. "要点表预算/限价已确认". */
@@ -54,6 +55,8 @@ export interface WorkflowInstanceEvent {
   ticketId?: string;
   reason?: string;
   text?: string;
+  /** The stage an approval belongs to (`approved` events). */
+  stage?: string;
 }
 
 export interface WorkflowInstanceSnapshot {
@@ -76,6 +79,8 @@ export interface WorkflowDefinitionItem {
   description: string;
   stageCount: number;
   instanceCount: number;
+  /** Previous versions stashed under `history/` (never the current one). */
+  historyVersions: number[];
   invalid?: string;
 }
 
@@ -124,8 +129,26 @@ export interface WorkflowInstanceNoteRequest {
   text: string;
 }
 
+export interface WorkflowInstanceApproveRequest {
+  /** Approval comment; optional. */
+  comment?: string;
+}
+
+export interface WorkflowDefinitionYaml {
+  id: string;
+  version: number;
+  yaml: string;
+}
+
 export interface WorkflowInstanceExport {
   instanceId: string;
   filename: string;
   markdown: string;
+}
+
+export interface WorkflowDigestResponse {
+  /** UTC day the digest covers (`YYYY-MM-DD`). */
+  date: string;
+  /** Markdown digest, or null on a quiet day. */
+  markdown: string | null;
 }

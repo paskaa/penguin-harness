@@ -8085,7 +8085,10 @@ export interface DesktopBrowserEventMessage {
 export type {
   WorkflowDefinition,
   WorkflowDefinitionItem,
+  WorkflowDefinitionYaml,
+  WorkflowDigestResponse,
   WorkflowInstanceAdvanceRequest,
+  WorkflowInstanceApproveRequest,
   WorkflowInstanceAttachRequest,
   WorkflowInstanceCreateRequest,
   WorkflowInstanceDetail,

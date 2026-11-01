@@ -19,6 +19,8 @@ import {
 import {
   isWorkflowInstanceId,
   workflowDefinitionPath,
+  workflowHistoryDir,
+  workflowHistoryPath,
   workflowInstanceEventsPath,
   workflowInstanceSnapshotPath,
   workflowInstancesDir,
@@ -53,7 +55,7 @@ function parseEventLine(line: string): WorkflowInstanceEvent | null {
     const v = JSON.parse(line) as Partial<WorkflowInstanceEvent>;
     if (!v || typeof v.kind !== "string" || typeof v.at !== "string" || typeof v.by !== "string")
       return null;
-    if (!["created", "advanced", "rejected", "attached", "note"].includes(v.kind)) return null;
+    if (!["created", "advanced", "rejected", "attached", "note", "approved"].includes(v.kind)) return null;
     return v as WorkflowInstanceEvent;
   } catch {
     return null;
@@ -94,6 +96,30 @@ export class WorkflowStore {
     const p = workflowDefinitionPath(dir, wfId);
     await fs.mkdir(path.dirname(p), { recursive: true });
     await atomicWriteFile(p, serializeWorkflowDefinition(def));
+  }
+
+  /** Previous raw of a definition, stashed on upgrade (empty when never upgraded). */
+  async stashHistory(dir: string, wfId: string, version: number, raw: string): Promise<void> {
+    const p = workflowHistoryPath(dir, wfId, version);
+    await fs.mkdir(path.dirname(p), { recursive: true });
+    await atomicWriteFile(p, raw.endsWith("\n") ? raw : `${raw}\n`);
+  }
+
+  /** Sorted previous versions kept under `history/` (never the current one). */
+  async historyVersions(dir: string, wfId: string): Promise<number[]> {
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = await fs.readdir(workflowHistoryDir(dir, wfId), { withFileTypes: true });
+    } catch {
+      return [];
+    }
+    return entries
+      .filter((e) => e.isFile())
+      .map((e) => /^v(\d+)\.yaml$/.exec(e.name)?.[1])
+      .filter((v): v is string => v !== undefined)
+      .map(Number)
+      .filter((v) => Number.isInteger(v) && v > 0)
+      .sort((a, b) => a - b);
   }
 
   /** Every instance directory carrying a `state.jsonl`, newest first by id. */

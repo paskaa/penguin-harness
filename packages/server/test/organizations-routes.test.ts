@@ -316,6 +316,18 @@ describe("organization routes", () => {
     expect((await owner.get(`${base}/acme/workflow-instances/nope/export`)).status).toBe(400);
     expect(calls.map((c) => c.method)).toContain("writeWorkflowDefinition");
     expect(calls.map((c) => c.method)).toContain("workflowExport");
+    expect((await owner.get(`${base}/acme/workflow-digest`)).status).toBe(200);
+    expect((await owner.get(`${base}/acme/workflow-digest?date=2026-11-01`)).status).toBe(200);
+    expect((await owner.get(`${base}/acme/workflow-digest?date=yesterday`)).status).toBe(400);
+    expect(calls.map((c) => c.method)).toContain("workflowDigest");
+    expect(
+      (await owner.post(`${base}/acme/workflow-instances/${id}/approve`, { comment: "ok" })).status,
+    ).toBe(200);
+    expect(
+      (await owner.post(`${base}/acme/workflow-instances/nope/approve`, {})).status,
+    ).toBe(400);
+    expect((await owner.get(`${base}/acme/workflows/bidding-v1/yaml`)).status).toBe(200);
+    expect(calls.map((c) => c.method)).toContain("approveWorkflowInstance");
   });
 
 

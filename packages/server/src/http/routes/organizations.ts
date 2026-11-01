@@ -15,8 +15,11 @@
  *   GET|POST      …/:orgId/tickets ; GET|PUT …/:orgId/tickets/:ticketId
  *   POST          …/:orgId/tickets/:ticketId/(move|block|unblock|progress|start|attach)
  *   GET           …/:orgId/workflows ; GET|PUT …/:orgId/workflows/:wfId
+ *   GET           …/:orgId/workflows/:wfId/yaml
  *   GET|POST      …/:orgId/workflow-instances ; GET …/:orgId/workflow-instances/:instanceId
  *   GET           …/:orgId/workflow-instances/:instanceId/export
+ *   GET           …/:orgId/workflow-digest[?date=]
+ *   POST          …/:orgId/workflow-instances/:instanceId/(advance|reject|attach|note|approve)
  *   GET|POST      …/:orgId/channels ; GET|PATCH …/:orgId/channels/:channelId
  *   POST          …/:orgId/channels/:channelId/members
  *   DELETE        …/:orgId/channels/:channelId/members/:principal
@@ -94,6 +97,13 @@ function requireWorkflowInstanceId(raw: string | undefined): string {
 function requireWorkflowStageKey(raw: unknown): string {
   if (typeof raw !== "string" || !/^[a-z][a-z0-9_]{1,63}$/.test(raw))
     throw badRequest("Invalid workflow stage.");
+  return raw;
+}
+
+/** A UTC day query (`?date=YYYY-MM-DD`) for the digest; absent means yesterday. */
+function requireDigestDate(raw: string | undefined): string | undefined {
+  if (raw === undefined || raw === "") return undefined;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) throw badRequest("Invalid date.");
   return raw;
 }
 
@@ -977,6 +987,14 @@ export function organizationRoutes(deps: OrgRouteDeps): Hono<AppEnv> {
     return c.json(await deps.orgService.writeWorkflowDefinition(projectId, orgId, wfId, yaml));
   });
 
+  app.get("/:orgId/workflows/:wfId/yaml", async (c) => {
+    const projectId = requireValidId(c, "projectId");
+    const orgId = requireValidId(c, "orgId");
+    const wfId = requireWorkflowId(c.req.param("wfId"));
+    member(c, projectId);
+    return c.json(await deps.orgService.workflowDefinitionYaml(projectId, orgId, wfId));
+  });
+
   app.get("/:orgId/workflow-instances", async (c) => {
     const projectId = requireValidId(c, "projectId");
     const orgId = requireValidId(c, "orgId");
@@ -1018,6 +1036,14 @@ export function organizationRoutes(deps: OrgRouteDeps): Hono<AppEnv> {
     const instanceId = requireWorkflowInstanceId(c.req.param("instanceId"));
     member(c, projectId);
     return c.json(await deps.orgService.workflowExport(projectId, orgId, instanceId));
+  });
+
+  app.get("/:orgId/workflow-digest", async (c) => {
+    const projectId = requireValidId(c, "projectId");
+    const orgId = requireValidId(c, "orgId");
+    member(c, projectId);
+    const date = requireDigestDate(c.req.query("date"));
+    return c.json(await deps.orgService.workflowDigest(projectId, orgId, date));
   });
 
   app.post("/:orgId/workflow-instances/:instanceId/advance", async (c) => {
@@ -1096,6 +1122,28 @@ export function organizationRoutes(deps: OrgRouteDeps): Hono<AppEnv> {
       ),
     );
   });
+
+  app.post("/:orgId/workflow-instances/:instanceId/approve", async (c) => {
+    const projectId = requireValidId(c, "projectId");
+    const orgId = requireValidId(c, "orgId");
+    const instanceId = requireWorkflowInstanceId(c.req.param("instanceId"));
+    member(c, projectId);
+    const body = await readJson(c);
+    const comment =
+      body.comment === undefined || body.comment === null
+        ? undefined
+        : requireString(body, "comment", { minLen: 1, maxLen: 2000 });
+    return c.json(
+      await deps.orgService.approveWorkflowInstance(
+        projectId,
+        orgId,
+        instanceId,
+        comment === undefined ? {} : { comment },
+        actorOf(c, body),
+      ),
+    );
+  });
+
   // ---- channels ----
 
   app.get("/:orgId/channels", async (c) => {

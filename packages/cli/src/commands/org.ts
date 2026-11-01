@@ -74,6 +74,7 @@ import type {
   OrganizationsResponse,
   WorkflowDefinition,
   WorkflowDefinitionsResponse,
+  WorkflowDigestResponse,
   WorkflowInstanceDetail,
   WorkflowInstanceExport,
   WorkflowInstancesResponse,
@@ -1479,13 +1480,34 @@ export function registerOrgCommand(program: Command, t: Messages): void {
 
   scoped(
     workflow
+      .command("approve <instance_id>")
+      .description(t.org.workflowApproveDesc)
+      .option("--comment <text>", t.org.wfCommentOpt),
+    t,
+  ).action(async (instanceId: string, opts) => {
+    const scope = await orgScope(opts, t);
+    if (scope === null) return;
+    const body = {
+      ...(opts.comment !== undefined ? { comment: String(opts.comment) } : {}),
+      ...actorFields(),
+    };
+    const detail = await scope.client.request<WorkflowInstanceDetail>(
+      "POST",
+      `${scope.base}/workflow-instances/${enc(instanceId)}/approve`,
+      body,
+    );
+    if (opts.json === true) printJson(detail);
+    else printLine(t.org.workflowApproved(detail.instanceId, detail.currentStage));
+  });
+
+  scoped(
+    workflow
       .command("reject <instance_id>")
       .description(t.org.workflowRejectDesc)
       .requiredOption("--reason <text>", t.org.wfReasonOpt)
       .option("--to <stage>", t.org.wfToOpt),
     t,
-  ).action(async (instanceId: string, opts) => {
-    const scope = await orgScope(opts, t);
+  ).action(async (instanceId: string, opts) => {    const scope = await orgScope(opts, t);
     if (scope === null) return;
     const detail = await scope.client.request<WorkflowInstanceDetail>(
       "POST",
@@ -1560,6 +1582,29 @@ export function registerOrgCommand(program: Command, t: Messages): void {
     } else {
       process.stdout.write(exp.markdown + (exp.markdown.endsWith("\n") ? "" : "\n"));
     }
+  });
+
+  scoped(
+    workflow
+      .command("digest")
+      .description(t.org.workflowDigestDesc)
+      .option("--date <yyyy-mm-dd>", t.org.wfDateOpt),
+    t,
+  ).action(async (opts) => {
+    const scope = await orgScope(opts, t);
+    if (scope === null) return;
+    const query =
+      opts.date !== undefined ? `?date=${enc(String(opts.date))}` : "";
+    const res = await scope.client.request<WorkflowDigestResponse>(
+      "GET",
+      `${scope.base}/workflow-digest${query}`,
+    );
+    if (opts.json === true) {
+      printJson(res);
+      return;
+    }
+    if (res.markdown === null) printLine(t.org.workflowQuiet(res.date));
+    else process.stdout.write(res.markdown + (res.markdown.endsWith("\n") ? "" : "\n"));
   });
 
   scoped(

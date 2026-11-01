@@ -18,6 +18,11 @@ import { parseChannelMessageLine, serializeChannelMessageLine } from "../../orga
 import { agentPrincipal, parsePrincipal, principalAgentId, principalSquadId } from "../../organization/principal.js";
 import { DEFAULT_CHANNEL_ID } from "../../organization/paths.js";
 import type { TicketFile, TicketFingerprint } from "../../organization/store.js";
+import {
+  summarizeWorkflowDay,
+  workflowDigestMarker,
+} from "../../organization/workflow-files.js";
+import { WorkflowStore } from "../../organization/workflow-store.js";
 import { zonedDate } from "../../organization/zoned.js";
 import { latestSlotAt, slotInWindow } from "../schedule-file.js";
 import { budgetLine, computeSpend, pausedEmployees } from "./budget.js";
@@ -904,6 +909,50 @@ export interface ReconcileResult {
 }
 
 /**
+ * The workflow daily digest: once per UTC day, when yesterday had workflow activity, one
+ * system message into the all-hands channel. Quiet days post nothing; an already-posted
+ * day never re-posts (the marker is the first line, scanned in today's and yesterday's
+ * channel files so a midnight race cannot double-post). Runs inside the pass, already
+ * under the organization's lock — never takes it again.
+ */
+export async function maybePostWorkflowDigest(
+  deps: OrgDeps,
+  org: LoadedOrg,
+  triggers = true,
+): Promise<void> {
+  if (!triggers) return;
+  const nowMs = nowOf(deps);
+  const target = new Date(nowMs - 86_400_000).toISOString().slice(0, 10);
+  const marker = workflowDigestMarker(target);
+  for (const day of [zonedDate(org.config.timezone, nowMs), zonedDate(org.config.timezone, nowMs - 86_400_000)]) {
+    const { messages } = await deps.store.readMessageDay(org.dir, DEFAULT_CHANNEL_ID, day);
+    if (messages.some((m) => m.text.includes(marker))) return;
+  }
+  const wf = new WorkflowStore();
+  const [defs, insts] = await Promise.all([
+    wf.listDefinitions(org.dir),
+    wf.listInstances(org.dir),
+  ]);
+  const markdown = summarizeWorkflowDay(
+    defs.flatMap((d) => (d.parsed.ok ? [d.parsed.value] : [])),
+    insts,
+    target,
+  );
+  if (markdown === null) return;
+  await appendChannelMessage(deps, org, DEFAULT_CHANNEL_ID, {
+    sender: "system",
+    hop: 0,
+    text: markdown,
+    mentions: [],
+  });
+}
+
+/**
+ * Reconciles one organization. `triggers: false` keeps the pass to caches, desks and
+ * budgets (the master switch is off, or a route only needs the projections refreshed).
+ */
+
+/**
  * Reconciles one organization. `triggers: false` keeps the pass to caches, desks and
  * budgets (the master switch is off, or a route only needs the projections refreshed).
  */
@@ -933,5 +982,6 @@ export async function reconcileOrg(
   await reconcileCalendar(deps, org, tickets, spend, paused, triggers);
   await reconcileTickets(deps, org, tickets);
   await scanChannels(deps, org, spend, triggers);
+  await maybePostWorkflowDigest(deps, org, triggers);
   return { org, tickets, spend };
 }
