@@ -330,24 +330,23 @@ Built with ❤️
 
 ## Local optimizations (Jingchuang Helian fork)
 
-This branch (`pg-migration`) is upstream v0.2.17 plus a set of on-premises enterprise enhancements, merged cleanly on top of upstream main (no rebase).
+This fork builds on upstream **v0.2.18** with in-house enhancements for internal
+deployments (branch `fork/0.2.18`, release `v0.2.18.1-helian`). Upstream is followed by
+merge, never rebase.
 
-**Optimization footprint** (vs the v0.2.17 merge-base, 34 commits):
+**Size** (against upstream v0.2.18, `9424ed4f`): 135 commits · 255 files ·
+**+27,348 / −937** lines.
 
-- **Files touched**: 111, of which **32 are new files**
-- **Line delta**: **+11,741 / −505** (net ≈ 1.12k LOC added)
-- **Commits**: 34 (including one upstream merge)
+**What it adds**
 
-**Areas of optimization**:
+| Area | Change |
+| --- | --- |
+| Database | PostgreSQL backend shim (`PENGUIN_DB=pg`): FTS5→tsvector translation, UPSERT/GREATEST dialects, named-parameter reuse, CJS worker. SQLite stays the default. |
+| Server · failover | `model_health` memory (consecutive-failure counts, quality bans) and chain-ordered failover on 429 / timeout / network / connect_failed. |
+| Server · schedules | Manual fire (`fireNow`), webhooks (signature / idempotency / replay), auto-pause after repeated failures with resume, inbox read marks and archive. |
+| Server · performance | Off-loop Trace parsing worker, session full-text search, usage daily rollup, list/usage read caches, newest-session shard warm on sidebar polls. |
+| Server · robustness | Gateway 4xx no longer treated as fatal; single-machine slice; `/api/socket` streaming transport. |
+| Web | Ticket board (grouping, bulk, approval queue), project-level schedules page, archived-conversations page with an undo receipt, company panels, live model-speed chip, branding. |
 
-| Module | Focus | Commits |
-| --- | --- | --- |
-| Database | PostgreSQL backend shim (`PENGUIN_DB=pg`), FTS5→tsvector translation, UPSERT/GREATEST dialect fixes, 21/21 tests green | 3 |
-| Web · Ticket board | Group by project/module/tender, bulk ops, approval queue, sort/toolbar/scroll columns, priority edge, single-card unblock | 9 |
-| Web · Schedules | Project-level schedules page (nav entry), manual-fire buttons, auto-paused status + resume button, webhook trigger section, invalid-files hint | 7 |
-| Web · Company/Org | Notification center + finance usage drill-down, per-employee model, per-group push switches, squad @-menu, exact-grammar mention markdown, read-marks/archive | 8 |
-| Web · Archived chats | Nav-level archived page, archive receipt (undo/view/deeplink), link titles, source pill | 4 |
-| Web · Misc | Employee machine pin picker (single-machine slice), message-stream fix, ticket-dialog guard | 3 |
-| Core | Context-engine improvements, abort-event error_message extension, 429 rate-limit failover chain (`pendingFailover`) | 2 |
-
-These changes have been running on the internal production instance; upstream changes are pulled in via merge (never rebase) so the branch can keep tracking main.
+Verified in production: `tsc` clean; model-health, failover-target, schedules, usage and
+migration suites green; live streaming measured end to end.
