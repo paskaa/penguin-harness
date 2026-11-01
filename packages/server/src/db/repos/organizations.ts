@@ -11,6 +11,7 @@
 import { Component, Use } from "@prismshadow/penguin-core/kernel";
 import type { Db } from "../../hmr/capabilities.js";
 import type { OrgCache } from "../../mechanisms/organization.js";
+import { invalidateOrgProject } from "../../runtime/organization/reconcile.js";
 import type { OrgCalendarOutcome, OrgTicketChange } from "../../api/types.js";
 
 export interface OrgSessionRow {
@@ -633,6 +634,9 @@ export class OrgCacheRepo implements OrgCache {
   // ---- lifecycle ----
 
   deleteOrg(projectId: string, orgId: string): void {
+    // PATCH(jchl254 2026-11-01, C4): a dropped projection rebuilds on the next pass — reset
+    // the sync throttle with it, or the throttle preserves the emptiness past the TTL.
+    invalidateOrgProject(projectId, orgId);
     for (const table of [
       "org_sessions",
       "org_ticket_sessions",

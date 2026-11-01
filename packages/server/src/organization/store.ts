@@ -7,6 +7,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { atomicWriteFile } from "@prismshadow/penguin-core";
+import { invalidateOrgCaches } from "../runtime/organization/reconcile.js";
 import type { OrgChannelMessage, OrgTicketStatus } from "../api/types.js";
 import type {
   CalendarEvent,
@@ -235,6 +236,9 @@ export class OrgStore {
 
   async writeDesks(dir: string, desks: Desks): Promise<void> {
     await writeText(desksPath(dir), serializeDesks(desks));
+    // PATCH(jchl254 2026-11-01, C4): desk writes move the ledger the next syncCaches
+    // projects; a throttled pass must not preserve the pre-write projection.
+    invalidateOrgCaches(dir);
   }
 
   /** A missing squad file is no squads. */
@@ -453,6 +457,9 @@ export class OrgStore {
     doc: TicketDoc,
   ): Promise<void> {
     await writeText(ticketPath(dir, ticketId, column), serializeTicket(doc));
+    // PATCH(jchl254 2026-11-01, C3/C4): the cached listing and the sync throttle die with
+    // the write (moveTicket funnels through here). The writer's own next read is immediate.
+    invalidateOrgCaches(dir);
   }
 
   /** Rewrites the file in its new column and removes the old one (the frontmatter was updated by the caller). */

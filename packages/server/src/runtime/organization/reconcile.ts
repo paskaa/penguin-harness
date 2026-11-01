@@ -64,13 +64,15 @@ function recordError(
 // 147 ticket files (~550ms). Share one walk across a 2s window and across concurrent
 // callers (sessions / tickets / chart ask for the same list within the same tick).
 // PATCH(jchl254 2026-11-01, C4): window widened from 1.5s to 2s, shared with syncCaches.
+// Keyed by org.dir (stable per organization in production, unique per test root in tests):
+// keying by orgId alone leaks one test's listing into the next within the TTL.
 const TICKET_LIST_TTL_MS = 2000;
 const ticketListCache = new Map<string, { at: number; value: TicketListing }>();
 const ticketListPending = new Map<string, Promise<TicketListing>>();
 export async function listTickets(deps: OrgDeps, org: LoadedOrg): Promise<TicketListing> {
-  const hit = ticketListCache.get(org.orgId);
+  const hit = ticketListCache.get(org.dir);
   if (hit !== undefined && Date.now() - hit.at < TICKET_LIST_TTL_MS) return hit.value;
-  const inflight = ticketListPending.get(org.orgId);
+  const inflight = ticketListPending.get(org.dir);
   if (inflight !== undefined) return inflight;
   const work = (async (): Promise<TicketListing> => {
   const files = await deps.store.listTickets(org.dir);
@@ -123,18 +125,18 @@ export async function listTickets(deps: OrgDeps, org: LoadedOrg): Promise<Ticket
     recordError(deps, org, "org_ticket_invalid", `Invalid ticket ${bad.path}: ${bad.error}`);
   }
   const out: TicketListing = { tickets, invalid };
-  ticketListCache.set(org.orgId, { at: Date.now(), value: out });
+  ticketListCache.set(org.dir, { at: Date.now(), value: out });
   if (ticketListCache.size > 64) {
     const oldest = ticketListCache.keys().next().value;
     if (oldest !== undefined) ticketListCache.delete(oldest);
   }
   return out;
   })();
-  ticketListPending.set(org.orgId, work);
+  ticketListPending.set(org.dir, work);
   try {
     return await work;
   } finally {
-    ticketListPending.delete(org.orgId);
+    ticketListPending.delete(org.dir);
   }
 }
 
@@ -184,6 +186,37 @@ function ownedSessions(
 // PATCH(jchl254 2026-11-01, C4): throttle companion to the C3 ticket-list cache above.
 const SYNC_CACHES_TTL_MS = 2000;
 const syncCachesAt = new Map<string, number>();
+// Dirs a (project, org) pair has been seen under: deleteOrg knows only the pair, not the
+// dir, so the pair -> dirs index lets a projection drop reset the entries of every dir the
+// pair was ever synced under (in production there is exactly one).
+const syncCachesDirs = new Map<string, Set<string>>();
+const orgPairKey = (projectId: string, orgId: string): string => `${projectId}\0${orgId}`;
+
+/**
+ * PATCH(jchl254 2026-11-01, C3/C4): a ticket or desk write makes the cached listing and the
+ * sync throttle stale; drop both so the next read sees the write. Called from the store
+ * mutators (writeTicket covers moveTicket, which funnels through it; writeDesks) — the
+ * 2s windows are a polling optimization, never a consistency window for the writer's own
+ * next read.
+ */
+export function invalidateOrgCaches(dir: string): void {
+  ticketListCache.delete(dir);
+  ticketListPending.delete(dir);
+  syncCachesAt.delete(dir);
+}
+
+/**
+ * PATCH(jchl254 2026-11-01, C4): a dropped projection must rebuild on the next pass, not
+ * after the TTL — db/repos/organizations.ts documents the same contract ("a dropped table
+ * costs one pass of silence, never a wrong answer"), and the throttle would otherwise
+ * preserve the emptiness. Called from the cache repo's deleteOrg via the pair -> dirs
+ * index above (deleteOrg knows only the pair, not the dir).
+ */
+export function invalidateOrgProject(projectId: string, orgId: string): void {
+  const dirs = syncCachesDirs.get(orgPairKey(projectId, orgId));
+  if (dirs === undefined) return;
+  for (const dir of dirs) invalidateOrgCaches(dir);
+}
 /**
  * Projects the ledger and the tickets' `sessions` fields into the two session caches, and
  * stamps `client = "org"` on every session row those files name. The caches are rebuilt from
@@ -197,9 +230,20 @@ export function syncCaches(deps: OrgDeps, org: LoadedOrg, tickets: readonly Load
   // PATCH(jchl254 2026-11-01, C4): this reconciles rows the board just read - the desk ledger,
   // the ticket-session table and the client stamp. Running it on every poll cost ~200ms of
   // writes for a result that cannot differ; 2s is well inside the UI's own refresh.
-  const last = syncCachesAt.get(org.orgId);
+  // Registered before the throttle check so a projection drop always finds the dir.
+  let dirs = syncCachesDirs.get(orgPairKey(org.projectId, org.orgId));
+  if (dirs === undefined) {
+    dirs = new Set<string>();
+    syncCachesDirs.set(orgPairKey(org.projectId, org.orgId), dirs);
+  }
+  dirs.add(org.dir);
+  if (syncCachesDirs.size > 64) {
+    const oldest = syncCachesDirs.keys().next().value;
+    if (oldest !== undefined) syncCachesDirs.delete(oldest);
+  }
+  const last = syncCachesAt.get(org.dir);
   if (last !== undefined && Date.now() - last < SYNC_CACHES_TTL_MS) return;
-  syncCachesAt.set(org.orgId, Date.now());
+  syncCachesAt.set(org.dir, Date.now());
   if (syncCachesAt.size > 64) {
     const oldest = syncCachesAt.keys().next().value;
     if (oldest !== undefined) syncCachesAt.delete(oldest);
