@@ -548,6 +548,8 @@ function InstanceDialog(props: {
   const [note, setNote] = useState("");
   const d = props.detail;
   const approvals = (d?.events ?? []).filter((e) => e.kind === "approved");
+  const stageName = (key: string): string =>
+    props.stages.find((s) => s.key === key)?.name ?? key;
   return (
     <Modal open onClose={props.onClose} title={d ? d.title : S.workflows.loading}>
       {!d ? (
@@ -650,7 +652,7 @@ function InstanceDialog(props: {
               <ul className="flex flex-col gap-1 text-sm text-gray-500">
                 {approvals.map((e, i) => (
                   <li key={`${e.at}-${i}`}>
-                    ✅ {e.stage} · {e.by} · {e.at.slice(0, 16).replace("T", " ")}
+                    ✅ {stageName(e.stage ?? "")} · {e.by} · {e.at.slice(0, 16).replace("T", " ")}
                     {e.reason ? ` · ${e.reason}` : ""}
                   </li>
                 ))}
