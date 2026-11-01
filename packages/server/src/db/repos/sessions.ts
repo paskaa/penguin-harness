@@ -270,6 +270,33 @@ export class SessionsRepo implements SessionIndex {
   }
 
   /**
+   * PATCH(jchl254 2026-10-31, C1): the same rows as findById, one statement per 400 ids.
+   * The organization board asked for ~150 sessions one blocking query at a time; SQLite's
+   * parameter limit is why this chunks instead of building one IN list.
+   */
+  findByIds(sessionIds: readonly string[]): Map<string, SessionRow> {
+    const out = new Map<string, SessionRow>();
+    const ids: string[] = [];
+    const seen = new Set<string>();
+    for (const id of sessionIds) {
+      if (typeof id !== "string" || id.length === 0 || seen.has(id)) continue;
+      seen.add(id);
+      ids.push(id);
+    }
+    for (let i = 0; i < ids.length; i += 400) {
+      const chunk = ids.slice(i, i + 400);
+      const rows = this.db
+        .prepare(`SELECT * FROM sessions WHERE session_id IN (${chunk.map(() => "?").join(", ")})`)
+        .all(...chunk);
+      for (const r of rows) {
+        const row = mapRow(r);
+        out.set(row.sessionId, row);
+      }
+    }
+    return out;
+  }
+
+  /**
    * An Agent's rows, newest first (the list order the sidebar shows; served by
    * idx_sessions_agent_created). Never filtered by `client` — every row is listed
    * whichever client created it.

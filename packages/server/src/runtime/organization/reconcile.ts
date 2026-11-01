@@ -125,8 +125,18 @@ function ownedSessions(
   org: LoadedOrg,
   tickets: readonly LoadedTicket[],
 ): { desks: SessionRow[]; tickets: Array<{ ticketId: string; row: SessionRow }> } {
+  // PATCH(jchl254 2026-10-31, C1): gather the ids first, then one batched read. This runs on
+  // every organization read (syncCaches), so the per-id findById here was the board's floor.
+  const wanted: string[] = [];
+  for (const desk of Object.values(org.desks)) {
+    for (const sessionId of [desk.sessionId, ...desk.previous]) wanted.push(sessionId);
+  }
+  for (const t of tickets) {
+    for (const sessionId of t.doc.sessions) wanted.push(sessionId);
+  }
+  const rowsById = deps.sessions.findByIds(wanted);
   const rowOf = (sessionId: string): SessionRow | null => {
-    const row = deps.sessions.findById(sessionId);
+    const row = rowsById.get(sessionId) ?? null;
     return row !== null && row.projectId === org.projectId ? row : null;
   };
   const desks: SessionRow[] = [];

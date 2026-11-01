@@ -3069,10 +3069,21 @@ export class OrganizationService {
     syncCaches(this.deps, org, tickets);
     const desks: OrgSessionsResponse["desks"] = [];
     const names = await orgEmployeeNames(this.deps, org);
+    // PATCH(jchl254 2026-10-31, C1): one read for every desk and ticket session, instead of
+    // one blocking findById per row (this is the endpoint the board actually waits on).
+    const wantedIds: string[] = [];
+    for (const e of org.chart.employees) {
+      const desk = org.desks[e.agentId];
+      if (desk) wantedIds.push(desk.sessionId);
+    }
+    for (const t of tickets) {
+      for (const sessionId of t.doc.sessions) wantedIds.push(sessionId);
+    }
+    const rowsById = this.deps.sessions.findByIds(wantedIds);
     for (const e of org.chart.employees) {
       const desk = org.desks[e.agentId];
       if (!desk) continue;
-      const row = this.deps.sessions.findById(desk.sessionId);
+      const row = rowsById.get(desk.sessionId) ?? null;
       // The ledger still names a Session that is gone (see employeeItems): not a desk anyone
       // can open, so not a row — until the pass opens a new one.
       if (row === null) continue;
@@ -3096,7 +3107,7 @@ export class OrganizationService {
         title: t.doc.title,
         status: t.doc.status,
         sessions: t.doc.sessions.map((sessionId) => {
-          const row = this.deps.sessions.findById(sessionId);
+          const row = rowsById.get(sessionId) ?? null;
           return {
             sessionId,
             agentId: row?.agentId ?? "",

@@ -24,6 +24,8 @@ export abstract class SessionIndex {
   abstract markDriven(sessionId: string, at: string): void;
   abstract touchLastActive(sessionId: string, at: string): void;
   abstract findById(sessionId: string): SessionRow | null;
+  /** PATCH(jchl254 2026-10-31, C1): the same rows as findById, one statement per 400 ids. */
+  abstract findByIds(sessionIds: readonly string[]): Map<string, SessionRow>;
   abstract listByAgent(projectId: string, agentId: string): SessionRow[];
   abstract listByProject(projectId: string): SessionRow[];
   abstract updateApprovalMode(sessionId: string, mode: ApprovalMode): void;
