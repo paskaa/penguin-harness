@@ -48,6 +48,13 @@ function fullReadBytesLimit(): number {
 const MESSAGES_PAGE_LIMIT_MAX = 1000;
 const MESSAGES_PAGE_LIMIT_DEFAULT = 200;
 
+// PATCH(jchl254 2026-11-01, C8): an idle Session's page cannot change, but every open
+// re-reads the shards behind it. Key carries last activity, the page request and how many
+// inputs are pending; any of those moving makes it a different page.
+const PAGED_MESSAGES_TTL_MS = 15000;
+const PAGED_MESSAGES_MAX = 8;
+const pagedMessagesCache = new Map<string, { at: number; body: MessagesResponse }>();
+
 /** Parse one windowed-read unit-count param (positive integer, capped). */
 function pageLimit(raw: string, name: string): number {
   if (!/^\d{1,4}$/.test(raw)) throw badRequest(`${name} must be a positive integer.`);
@@ -163,15 +170,27 @@ export async function sessionMessages(
   // page the client would have asked for, and say so in `page` (see FULL_READ_BYTES_LIMIT).
   let autoWindowed = false;
   let effectivePage = page;
+  // PATCH(jchl254 2026-11-01, C5): the auto window exists, but 200 turns is most of a 900MB
+  // trace - the first open still paid ~3s. Tier the window by trace BYTES, and clamp an
+  // explicit `before` request the same way (the UI asks for 200 turns there too).
+  const traceBytesNow = await deps.traceService.traceBytes(row.projectId, row.agentId, row.sessionId);
+  const hugeTrace = traceBytesNow >= 64 * 1024 * 1024;
   if (page === null) {
-    const bytes = await deps.traceService.traceBytes(row.projectId, row.agentId, row.sessionId);
-    if (bytes > fullReadBytesLimit()) {
+    if (traceBytesNow > fullReadBytesLimit()) {
       autoWindowed = true;
-      effectivePage = { kind: "tail", limit: MESSAGES_PAGE_LIMIT_DEFAULT };
+      const tiered = hugeTrace ? 3 : traceBytesNow >= 16 * 1024 * 1024 ? 8 : 20;
+      effectivePage = { kind: "tail", limit: tiered };
     }
+  } else if (page.kind === "before" && hugeTrace && page.limit > 3) {
+    effectivePage = { ...page, limit: 3 };
   }
 
   if (effectivePage !== null) {
+    // PATCH(jchl254 2026-11-01, C8): ... (key/cache declared at module top).
+    const pagedKey = `${row.sessionId} ${row.lastActiveAt ?? ""} ${JSON.stringify(effectivePage)} ${pendingInputs.length}`;
+    const pagedHit = pagedMessagesCache.get(pagedKey);
+    if (pagedHit !== undefined && Date.now() - pagedHit.at < PAGED_MESSAGES_TTL_MS)
+      return c.json(pagedHit.body);
     const result = await deps.traceService.readMessagesPage(
       row.projectId,
       row.agentId,
@@ -198,11 +217,17 @@ export async function sessionMessages(
     const messages = appendPendingInputs(result.messages, pendingInputs).map((m) =>
       withImagesByReference(row.sessionId, m, imageBase),
     );
-    return c.json({
+    const body = {
       messages,
       ...(live !== undefined ? { live } : {}),
       page: info,
-    } satisfies MessagesResponse);
+    } satisfies MessagesResponse;
+    pagedMessagesCache.set(pagedKey, { at: Date.now(), body });
+    if (pagedMessagesCache.size > PAGED_MESSAGES_MAX) {
+      const oldest = pagedMessagesCache.keys().next().value;
+      if (oldest !== undefined) pagedMessagesCache.delete(oldest);
+    }
+    return c.json(body);
   }
   const messages = await deps.traceService.readMessages(row.projectId, row.agentId, row.sessionId);
   return c.json({
