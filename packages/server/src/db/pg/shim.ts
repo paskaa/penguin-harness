@@ -197,22 +197,41 @@ class LazyPgStatement implements PgStatementSyncLike {
 }
 
 export class PgDatabaseSync implements PgDatabaseSyncLike {
-  private readonly worker: Worker;
+  private worker!: Worker;
   /** Main-side reply port (port1); port2 is transferred to the worker with the first request. */
-  private readonly replyPort: MessagePortType;
-  private readonly workerPort: MessagePortType;
-  private readonly ctrl: Int32Array;
+  private replyPort!: MessagePortType;
+  private workerPort!: MessagePortType;
+  private ctrl!: Int32Array;
   private primed = false;
   private nextId = 0;
+  /* PG_SHIM_RESILIENT_V1: see spawn() below — a timed-out query must not leave
+   * a late reply on the shared port, and a stuck worker must be replaced. */
   private closed = false;
+  private workerDead = false;
+  private generation = 0;
   /** table → primary key columns (catalog, cached). */
   private readonly pkCache = new Map<string, string[] | null>();
   private readonly cfg: PgConfig;
 
   constructor(cfg?: PgConfig) {
     this.cfg = cfg ?? pgConfigFromEnv();
-    // The worker is built as CommonJS (tsup onSuccess → esbuild): pg's dependency
-    // graph uses dynamic require() that esbuild's ESM output cannot express.
+    this.spawn();
+  }
+
+  /**
+   * PG_SHIM_RESILIENT_V1 (2026-11-05)
+   *
+   * Create a fresh worker / reply port / control block. A timeout or a crashed
+   * worker MUST NOT leave a late reply sitting on the shared MessagePort: the
+   * old call() consumed receiveMessageOnPort() without checking the id, so one
+   * timed-out query permanently shifted every later result by one. Symptoms:
+   * /api/me 401 (logged out), admin password "stops working", and every
+   * external DB change invisible until the whole process was restarted.
+   */
+  private spawn(): void {
+    const gen = ++this.generation;
+    // The worker is built as CommonJS (tsup onSuccess -> esbuild): pg's
+    // dependency graph uses dynamic require() that esbuild's ESM cannot express.
     this.worker = new Worker(resolveWorkerUrl(), {
       env: { ...process.env, PENGUIN_PG_CFG: JSON.stringify(this.cfg) },
     });
@@ -220,9 +239,31 @@ export class PgDatabaseSync implements PgDatabaseSyncLike {
     this.replyPort = port1;
     this.workerPort = port2;
     this.ctrl = new Int32Array(new SharedArrayBuffer(8));
+    this.primed = false;
+    this.workerDead = false;
     this.worker.on("error", (err) => {
       process.stderr.write(`[pg-shim] worker error: ${String(err)}\n`);
     });
+    this.worker.on("exit", (code) => {
+      // Only the CURRENT worker may mark the connection dead. A superseded
+      // worker exits during resetWorker() and must not poison the fresh one.
+      if (gen === this.generation && !this.closed) {
+        this.workerDead = true;
+        process.stderr.write(
+          `[pg-shim] worker exited (code ${code}); respawning on next query\n`,
+        );
+      }
+    });
+  }
+
+  /** Terminate a stuck worker and respawn with a brand-new port/control block. */
+  private resetWorker(reason: string): void {
+    process.stderr.write(`[pg-shim] resetting worker: ${reason}\n`);
+    const oldWorker = this.worker;
+    const oldPort = this.replyPort;
+    this.spawn();
+    try { void oldWorker.terminate(); } catch { /* already gone */ }
+    try { oldPort.close(); } catch { /* already closed */ }
   }
 
   /** Primary-key columns for INSERT OR REPLACE translation (catalog, cached). */
@@ -256,24 +297,38 @@ export class PgDatabaseSync implements PgDatabaseSyncLike {
     want: "exec" | "rows" | "run",
   ): { rows: Record<string, unknown>[]; changes: number } {
     if (this.closed) throw new Error("pg-shim: database is closed");
+    if (this.workerDead) this.resetWorker("previous worker exited");
     const id = ++this.nextId;
     const req: Req = { id, sql, params, want };
-    Atomics.store(this.ctrl, 0, 0);
+    // Capture the current generation's channel. If a timeout resets the worker
+    // mid-flight, the late reply lands on the OLD (closed) port, not this one.
+    const ctrl = this.ctrl;
+    const port = this.replyPort;
+    Atomics.store(ctrl, 0, 0);
     if (!this.primed) {
       // First request carries the reply port (transferred; neuters the main-side
       // copy) and the shared control block (shared by reference). A MessagePort
       // in a message MUST be listed in the transferList.
-      this.worker.postMessage({ req, port: this.workerPort, ctrl: this.ctrl }, [this.workerPort]);
+      this.worker.postMessage({ req, port: this.workerPort, ctrl }, [this.workerPort]);
       this.primed = true;
     } else {
       this.worker.postMessage({ req });
     }
-    const wait = Atomics.wait(this.ctrl, 0, 0, QUERY_TIMEOUT_MS);
+    const wait = Atomics.wait(ctrl, 0, 0, QUERY_TIMEOUT_MS);
     if (wait === "timed-out") {
+      this.resetWorker(`query timed out after ${QUERY_TIMEOUT_MS}ms (id ${id})`);
       throw new Error(`pg-shim: query timed out after ${QUERY_TIMEOUT_MS}ms: ${sql.slice(0, 160)}`);
     }
-    const received = receiveMessageOnPort(this.replyPort);
-    if (!received) throw new Error("pg-shim: worker reply missing");
+    // Consume replies until we see OUR id. A late reply from an abandoned
+    // request must never be mistaken for this query's result.
+    let received = receiveMessageOnPort(port);
+    while (received && (received.message as Reply | undefined)?.id !== id) {
+      received = receiveMessageOnPort(port);
+    }
+    if (!received) {
+      this.resetWorker(`reply missing for id ${id}`);
+      throw new Error("pg-shim: worker reply missing");
+    }
     const reply = received.message as Reply;
     if (reply.error) throw new Error(`pg-shim: ${reply.error} | sql: ${sql.slice(0, 240)}`);
     return { rows: reply.result?.rows ?? [], changes: reply.result?.changes ?? 0 };
