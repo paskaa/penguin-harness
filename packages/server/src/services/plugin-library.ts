@@ -133,8 +133,9 @@ export function pluginFiles(plugin: LibraryPlugin): Record<string, string> {
   const files: Record<string, string> = {};
   for (const skill of plugin.skills) {
     files[`skills/${skill.name}/SKILL.md`] = skill.content;
-    for (const [rel, text] of Object.entries(skill.files ?? {})) {
-      files[`skills/${skill.name}/${rel}`] = text;
+    for (const [rel, data] of Object.entries(skill.files ?? {})) {
+      // The detail view opens files as text; a skill's binary asset is installed but not shown.
+      if (typeof data === "string") files[`skills/${skill.name}/${rel}`] = data;
     }
   }
   for (const [rel, text] of Object.entries(plugin.hooks?.files ?? {})) {

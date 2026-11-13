@@ -80,11 +80,14 @@ export interface LibrarySkill extends SkillMetadata {
    * Optional auxiliary files the SKILL.md references (e.g. `reference/API.md`), keyed by
    * POSIX-relative path within the skill directory; every entry except the top-level SKILL.md
    * (its own field) and a top-level icon.svg (reserved: the plugin's icon is what installs
-   * there). Written alongside SKILL.md on install (subdirectories preserved). Read as UTF-8
-   * text: a file that is not valid UTF-8 (an image) is left out, never installed garbled. The
-   * field is omitted when a skill has no extra files.
+   * there). Written alongside SKILL.md on install (subdirectories preserved).
+   *
+   * Text is a string; a binary asset a skill legitimately ships (an image, a template document,
+   * a data file) is its bytes — only for the extensions in SKILL_BINARY_EXTENSIONS and under the
+   * size cap, so a package cannot smuggle arbitrary blobs in as "skill content". Anything else
+   * that is not valid UTF-8 is left out, never installed garbled.
    */
-  files?: Record<string, string>;
+  files?: Record<string, string | Uint8Array>;
 }
 
 /**
@@ -692,6 +695,70 @@ function readDirFiles(
   return Object.keys(files).length > 0 ? files : undefined;
 }
 
+/** The binåry assets a skill may ship: inert media and documents, never executables. */
+export const SKILL_BINARY_EXTENSIONS: readonly string[] = [
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".webp",
+  ".svg",
+  ".ico",
+  ".pdf",
+  ".docx",
+  ".xlsx",
+  ".pptx",
+  ".csv.gz",
+  ".zip",
+  ".woff",
+  ".woff2",
+  ".ttf",
+  ".mp3",
+  ".mp4",
+  ".webm",
+];
+
+/** The most one binary asset inside a skill may weigh. */
+export const MAX_SKILL_BINARY_BYTES = 5 * 1024 * 1024;
+
+/** Whether a file is a binary asset a skill may carry (allowlisted extension, within the cap). */
+export function carriesBinary(rel: string, size: number): boolean {
+  if (size > MAX_SKILL_BINARY_BYTES) return false;
+  const lower = rel.toLowerCase();
+  return SKILL_BINARY_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
+
+/**
+ * A skill's own auxiliary files: text as text, and an allowlisted binary asset (an image, a
+ * template document, a data file) as its bytes. A skill that needs a picture or a spreadsheet to
+ * do its job ships it here; anything else that is not valid UTF-8 is left out, never installed
+ * garbled.
+ */
+function readSkillFiles(
+  dir: string,
+  except: readonly string[],
+  skipped: string[],
+): Record<string, string | Uint8Array> | undefined {
+  const files: Record<string, string | Uint8Array> = {};
+  const walk = (abs: string, rel: string): void => {
+    for (const entry of fs.readdirSync(abs, { withFileTypes: true })) {
+      const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        walk(path.join(abs, entry.name), childRel);
+      } else if (entry.isFile()) {
+        if (rel === "" && except.includes(entry.name)) continue;
+        const bytes = fs.readFileSync(path.join(abs, entry.name));
+        const text = utf8Text(bytes);
+        if (text !== null) files[childRel] = text;
+        else if (carriesBinary(childRel, bytes.byteLength)) files[childRel] = new Uint8Array(bytes);
+        else skipped.push(childRel);
+      }
+    }
+  };
+  walk(dir, "");
+  return Object.keys(files).length > 0 ? files : undefined;
+}
+
 /**
  * Reads one skill directory: name from the directory (overriding frontmatter), SKILL.md verbatim,
  * and every other file as auxiliary content. The icon is not read here: a skill has none of
@@ -709,7 +776,7 @@ function readSkillDir(dir: string, name: string, strict: boolean, skipped: strin
     throw new Error(`Library skill ${file}: version must be YYYY.MM.DD.N`);
   }
   const auxiliary: string[] = [];
-  const files = readDirFiles(dir, ["SKILL.md", "icon.svg"], auxiliary);
+  const files = readSkillFiles(dir, ["SKILL.md", "icon.svg"], auxiliary);
   skipped.push(...auxiliary.map((rel) => `skills/${name}/${rel}`));
   return { ...meta, name, content, ...(files !== undefined ? { files } : {}) };
 }

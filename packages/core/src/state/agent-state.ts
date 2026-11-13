@@ -515,7 +515,12 @@ export async function installSkill(
   root: string,
   projectId: string,
   agentId: string,
-  skill: { name: string; content: string; icon?: string; files?: Record<string, string> },
+  skill: {
+    name: string;
+    content: string;
+    icon?: string;
+    files?: Record<string, string | Uint8Array>;
+  },
 ): Promise<void> {
   assertValidId("project_id", projectId);
   assertValidId("agent_id", agentId);
@@ -524,9 +529,11 @@ export async function installSkill(
   for (const [rel] of auxiliary) assertSafeSkillFile(rel);
   const dir = path.join(skillsDir(root, projectId, agentId), skill.name);
   const content = skill.content.endsWith("\n") ? skill.content : `${skill.content}\n`;
-  const files: Array<[string, string]> = [
+  const files: Array<[string, string | Uint8Array]> = [
     ["SKILL.md", content],
-    ...(skill.icon !== undefined ? ([["icon.svg", skill.icon]] as Array<[string, string]>) : []),
+    ...(skill.icon !== undefined
+      ? ([["icon.svg", skill.icon]] as Array<[string, string | Uint8Array]>)
+      : []),
     ...auxiliary,
   ];
   // Clean replace: no stale file survives a reinstall (same semantics as the archive route).
