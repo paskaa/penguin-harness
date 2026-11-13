@@ -7,7 +7,7 @@
  * The shell owns the wallpaper and navigation's separate glass layer, so the columns make no
  * stacking context that could trap their menus.
  */
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Outlet, useLocation, useMatch, useNavigate } from "react-router";
 import {
   AppShell,
@@ -48,7 +48,7 @@ import { NEW_CHAT_ICON, Sidebar } from "./sidebar";
 import { FindBar } from "../find/find-bar";
 import { UserMenu } from "./user-menu";
 import { isCurrentPath, renderRouterLink } from "./router-link";
-import { DRAFT_SESSION_ID } from "../../features/chat/chat-page";
+import { DRAFT_SESSION_ID } from "../../features/chat/draft-session";
 import { useNewChat } from "../../features/chat/use-new-chat";
 import { ChangePasswordDialog } from "../account/change-password-dialog";
 import { AppInfoDialog } from "../account/app-info-dialog";
@@ -500,7 +500,11 @@ export function AppLayout() {
       )}
 
       <main className="min-h-0 min-w-0 flex-1 overflow-hidden">
-        <Outlet />
+        {/* PATCH(jchl254 2026-11-02): pages load as their own chunks; the boundary sits here so
+            the sidebar and header stay mounted while one arrives. */}
+        <Suspense fallback={null}>
+          <Outlet />
+        </Suspense>
       </main>
       {/* The docks themselves render inside the chat page (features/dock); the xterm
           views live in this pool and are adopted into dock tab bodies by DOM handoff,

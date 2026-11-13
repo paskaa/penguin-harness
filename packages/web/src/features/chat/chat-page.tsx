@@ -257,18 +257,11 @@ function speedText(stats: StreamModel["stats"], taskOpen: boolean): string | nul
   return reading.estimated ? `≈${text}` : text;
 }
 
-/**
- * Route id for a draft chat (`/chat/new`): the Session hasn't been persisted yet — the user may
- * still want to change the model or configure a key first. The actual Session is only created
- * once **the first message is sent** (once created, the model is locked into its meta).
- * Real session ids always start with `session-`, so there's no collision with this constant —
- * nor with parked draft conversations, whose route ids start with `draft-` (draft-sessions.ts).
- */
-export const DRAFT_SESSION_ID = "new";
+// PATCH(jchl254 2026-11-02): moved to draft-session.ts so the app shell can import the id
+// without pulling this page (and its markdown renderer) into the entry chunk.
+import { DRAFT_SESSION_ID, parkedDraftIdOf } from "./draft-session";
 
-/** Parked-draft route id (`/chat/draft-…` — a draft conversation row in the sidebar list), or null. */
-export const parkedDraftIdOf = (routeSessionId: string | null): string | null =>
-  routeSessionId !== null && routeSessionId.startsWith("draft-") ? routeSessionId : null;
+export { DRAFT_SESSION_ID, parkedDraftIdOf };
 
 /**
  * Server-enforced ceiling on paths per files/stat call (STAT_MAX_PATHS in the sessions routes,
