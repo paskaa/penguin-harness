@@ -72,7 +72,12 @@ describe("navKeysFor", () => {
     // /api/machines is admin-gated server-side (it spawns ssh with the server account's
     // keys), so offering a member the row would only ever produce a 403.
     expect(navKeysFor(true)).toContain("machines");
-    expect(navKeysFor(false)).toEqual(navKeysFor(true).filter((key) => key !== "machines"));
+    // The dsh market is admin-only too: adding a source or installing a package writes on the
+    // server, so a member's row could only ever answer 403.
+    expect(navKeysFor(true)).toContain("dsh-market");
+    expect(navKeysFor(false)).toEqual(
+      navKeysFor(true).filter((key) => key !== "machines" && key !== "dsh-market"),
+    );
   });
 });
 
@@ -80,7 +85,7 @@ describe("pinned vs. collapsible", () => {
   it("defaults: New chat, Agents, Scheduled tasks, Archived chats, Models and Plugins pinned; the rest collapsible", () => {
     expect(splitNavEntries(navEntryKeysFor(true), {})).toEqual({
       pinned: ["newChat", "agents", "schedules", "archived", "models", "plugins"],
-      collapsible: ["machines", "usage", "benchmark"],
+      collapsible: ["dsh-market", "machines", "usage", "benchmark"],
     });
   });
 
@@ -101,7 +106,7 @@ describe("pinned vs. collapsible", () => {
     // Models lands ahead of Machines (its manifest place), not at the end it was moved to.
     expect(splitNavEntries(navEntryKeysFor(true), unpinned)).toEqual({
       pinned: ["newChat", "agents", "schedules", "archived", "plugins"],
-      collapsible: ["models", "machines", "usage", "benchmark"],
+      collapsible: ["models", "dsh-market", "machines", "usage", "benchmark"],
     });
   });
 
@@ -111,7 +116,7 @@ describe("pinned vs. collapsible", () => {
     expect(first).toEqual(second);
     expect(splitNavEntries(navEntryKeysFor(true), first)).toEqual({
       pinned: ["newChat", "agents", "schedules", "archived", "models", "plugins", "usage", "benchmark"],
-      collapsible: ["machines"],
+      collapsible: ["dsh-market", "machines"],
     });
   });
 
@@ -145,7 +150,7 @@ describe("pinned vs. collapsible", () => {
   it("everything pinned leaves the collapsible area empty, so folding hides nothing", () => {
     let overrides: NavPinOverrides = {};
     for (const key of navEntryKeysFor(true)) overrides = withNavPinned(overrides, key, true);
-    expect(overrides).toEqual({ machines: true, usage: true, benchmark: true });
+    expect(overrides).toEqual({ "dsh-market": true, machines: true, usage: true, benchmark: true });
     const { collapsible } = splitNavEntries(navEntryKeysFor(true), overrides);
     expect(collapsible).toEqual([]);
     expect(visibleNavKeys(true, true, overrides)).toEqual(navEntryKeysFor(true));
@@ -190,6 +195,7 @@ describe("visibleNavKeys", () => {
       "archived",
       "plugins",
       "models",
+      "dsh-market",
       "machines",
       "usage",
       "benchmark",
@@ -283,7 +289,7 @@ describe("persisted pin choices (one global localStorage key)", () => {
     expect(restored).toEqual(moved);
     expect(splitNavEntries(navEntryKeysFor(true), restored)).toEqual({
       pinned: ["newChat", "agents", "schedules", "archived", "plugins", "usage"],
-      collapsible: ["models", "machines", "benchmark"],
+      collapsible: ["models", "dsh-market", "machines", "benchmark"],
     });
   });
 

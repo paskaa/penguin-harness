@@ -277,6 +277,12 @@ import type {
   BrowserExtensionPairingResponse,
   BrowserExtensionsResponse,
   DesktopBrowserCommand,
+  DshMarketInstallJob,
+  DshMarketInstallRequest,
+  DshMarketInstallResponse,
+  DshMarketResponse,
+  DshMarketSourceRequest,
+  DshMarketUninstallRequest,
 } from "@prismshadow/penguin-server/api";
 import type { MCPServerConfig } from "@prismshadow/penguin-core/interfaces";
 import { apiFetch, apiFetchWithMeta } from "./client";
@@ -1955,12 +1961,7 @@ export interface ScheduleWebhookSecretView extends ScheduleWebhookView {
 }
 
 export type ScheduleWebhookDeliveryStatus =
-  | "queued"
-  | "accepted"
-  | "skipped"
-  | "ignored"
-  | "duplicate"
-  | "rejected";
+  "queued" | "accepted" | "skipped" | "ignored" | "duplicate" | "rejected";
 
 export interface ScheduleWebhookDeliveryView {
   id: string;
@@ -1984,7 +1985,11 @@ export const createScheduleWebhook = (
   agentId: string,
   name: string,
   body: { provider?: ScheduleWebhookProvider; secret?: string },
-) => apiFetch<ScheduleWebhookSecretView>(webhookBase(projectId, agentId, name), { method: "POST", body });
+) =>
+  apiFetch<ScheduleWebhookSecretView>(webhookBase(projectId, agentId, name), {
+    method: "POST",
+    body,
+  });
 
 /** Reads the trigger; the token stays redacted (path reads empty). */
 export const getScheduleWebhook = (projectId: string, agentId: string, name: string) =>
@@ -1999,7 +2004,9 @@ export const updateScheduleWebhook = (
 
 /** Mints a fresh token (the old URL dies); the only other answer carrying it. */
 export const rotateScheduleWebhook = (projectId: string, agentId: string, name: string) =>
-  apiFetch<ScheduleWebhookSecretView>(`${webhookBase(projectId, agentId, name)}/rotate`, { method: "POST" });
+  apiFetch<ScheduleWebhookSecretView>(`${webhookBase(projectId, agentId, name)}/rotate`, {
+    method: "POST",
+  });
 
 export const deleteScheduleWebhook = (projectId: string, agentId: string, name: string) =>
   apiFetch<void>(webhookBase(projectId, agentId, name), { method: "DELETE" });
@@ -2066,6 +2073,58 @@ export const installAgentPlugins = (
 
 /** Plugin index (available to any logged-in user): the merged index of every configured registry. */
 export const getPluginIndex = () => apiFetch<PluginIndexResponse>("/api/plugins/registry");
+
+/**
+ * One page of the DeepSeek Harness market: the sources this server reads, how many entries match
+ * (`q`, the whole market without one) and one slice of them. The whole set is thousands of plugins,
+ * so the page never asks for all of it.
+ */
+export const getDshMarket = (
+  opts: { q?: string; category?: string; offset?: number; limit?: number } = {},
+) =>
+  apiFetch<DshMarketResponse>("/api/plugins/dsh-market", {
+    query: {
+      q: opts.q === "" ? undefined : opts.q,
+      category: opts.category,
+      offset: opts.offset,
+      limit: opts.limit,
+    },
+  });
+
+/** Adds one dsh index source (admin) and answers the whole listing again. */
+export const addDshMarketSource = (url: string) =>
+  apiFetch<DshMarketResponse>("/api/plugins/dsh-market/sources", {
+    method: "POST",
+    body: { url } satisfies DshMarketSourceRequest,
+  });
+
+/** Removes one dsh index source (admin) and answers the whole listing again. */
+export const removeDshMarketSource = (id: string) =>
+  apiFetch<DshMarketResponse>(`/api/plugins/dsh-market/sources/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+
+/**
+ * Starts converting and installing one listed plugin (admin). The work runs in the background —
+ * a tarball fetch plus `npm install` outlives a request — so this answers a job the caller polls
+ * with {@link getDshInstallJob}; a plugin with nothing to carry fails it with `dsh_not_adaptable`.
+ */
+export const startDshInstall = (body: DshMarketInstallRequest) =>
+  apiFetch<DshMarketInstallJob>("/api/plugins/dsh-market/install", {
+    method: "POST",
+    body,
+  });
+
+/** One install job's state, polled until it is "done" or "failed". */
+export const getDshInstallJob = (id: string) =>
+  apiFetch<DshMarketInstallJob>(`/api/plugins/dsh-market/install/${encodeURIComponent(id)}`);
+
+/** Removes one ported package (`@dsh-ported/…`) from this server (admin) and answers the listing. */
+export const uninstallDshPlugin = (name: string) =>
+  apiFetch<DshMarketResponse>("/api/plugins/dsh-market/uninstall", {
+    method: "POST",
+    body: { name } satisfies DshMarketUninstallRequest,
+  });
 
 /** Languages plugins contributed; the grammars themselves are fetched by the highlighter. */
 export const getLanguages = () => apiFetch<LanguageIndexResponse>("/api/languages");
@@ -2673,10 +2732,10 @@ export const patchOrgEmployee = (
       /** LOCAL-ONLY mirror, same reason: absent = this server. */
       machine?: string;
     }
-  >(
-    `${orgBase(projectId, orgId)}/employees/${encodeURIComponent(agentId)}`,
-    { method: "PATCH", body },
-  );
+  >(`${orgBase(projectId, orgId)}/employees/${encodeURIComponent(agentId)}`, {
+    method: "PATCH",
+    body,
+  });
 
 export const leaveOrganization = (projectId: string, orgId: string, agentId: string) =>
   apiFetch<void>(`${orgBase(projectId, orgId)}/employees/${encodeURIComponent(agentId)}`, {
@@ -2802,8 +2861,7 @@ export interface SquadReviewVoteResponse {
 }
 
 /** The vote-gate switches of every squad registry (the review column's button reads this). */
-export const getSquadReviewVote = () =>
-  apiFetch<SquadReviewVoteResponse>("/api/squad/review-vote");
+export const getSquadReviewVote = () => apiFetch<SquadReviewVoteResponse>("/api/squad/review-vote");
 
 /** Flips one registry (`key`) or all of them (`key` omitted) at once. */
 export const putSquadReviewVote = (reviewVote: boolean, key?: string) =>

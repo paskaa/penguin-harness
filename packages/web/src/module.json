@@ -94,6 +94,17 @@
         }
       },
       {
+        "id": "web.dsh-market",
+        "key": "dsh-market",
+        "path": "/dsh-market",
+        "nav": "main",
+        "admin": true,
+        "released": true,
+        "renderer": {
+          "builtin": "DshMarketPage"
+        }
+      },
+      {
         "id": "web.machines",
         "key": "machines",
         "path": "/machines",

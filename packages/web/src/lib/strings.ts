@@ -27,6 +27,7 @@ export const zh = {
     models: "模型库",
     machines: "机器管理",
     plugins: "插件市场",
+    "dsh-market": "DSH 插件市场",
     usage: "成本中心",
     traces: "轨迹观测",
     benchmark: "评估中心",
@@ -1515,7 +1516,8 @@ export const zh = {
     version: (v: number) => `v${v}`,
     stageCount: (n: number) => `${n} 个阶段`,
     instanceCount: (n: number) => `${n} 个实例`,
-    noDefinitions: "还没有流程定义。招投标模板会在首次打开时自动生成，如仍为空请检查服务器模板文件。",
+    noDefinitions:
+      "还没有流程定义。招投标模板会在首次打开时自动生成，如仍为空请检查服务器模板文件。",
     noInstances: "还没有实例。选一个定义，为一个招标项目发起第一个实例。",
     attached: (n: number) => `已挂 ${n} 个工单`,
     stale: "快照与事件流不一致（已按事件流重建显示）",
@@ -6224,7 +6226,8 @@ Benchmark：
       setMachine: "设运行机器",
       machineTitle: (name: string): string => `调整 ${name} 的运行机器`,
       machineLabel: "运行机器",
-      machineInfo: "该员工的会话在哪台机器上运行。本机是默认值；远程机器需要多机版，当前构建只读不选。",
+      machineInfo:
+        "该员工的会话在哪台机器上运行。本机是默认值；远程机器需要多机版，当前构建只读不选。",
       machineLocal: (alias: string): string => `本机（${alias}，默认）`,
       machineRemoteNote: "（需多机版）",
       /** An entry whose Agent no longer exists: the card's flag, and the chart's notice when it is the CEO. */
@@ -6949,6 +6952,62 @@ Benchmark：
       shell_unreachable: "无法联系桌面应用。",
       timeout: "操作超时，请重试。",
     },
+  },
+
+  dshMarket: {
+    pageTitle: "DSH 插件市场",
+    pageDesc:
+      "DeepSeek Harness（dsh）的插件索引。dsh 插件跑在 dsh 宿主里，不能原样装到本服务器；安装时只搬运其中 PenguinHarness 也有对应物的部分——技能（skills）与 MCP 服务器，其余部分会被列出并丢弃。",
+    sources: "索引源",
+    sourcesEmpty:
+      "还没有索引源。添加一个 dsh 插件索引（format 1 的 JSON 文件）后，它列出的插件会出现在下面。",
+    sourceUrlPlaceholder:
+      "索引文件地址，例如 https://cdn.jsdelivr.net/npm/dsh-plugin-catalog/index.json",
+    add: "添加索引源",
+    adding: "添加中…",
+    remove: "移除",
+    removeConfirm: (url: string): string =>
+      `移除索引源 ${url}？它的条目会从列表里消失，已经安装的插件不受影响。`,
+    cancel: "取消",
+    pluginsCount: (n: number): string => `${n} 个插件`,
+    sourceReading: "读取中…",
+    sourceFailed: (error: string): string => `读取失败：${error}`,
+    searchPlaceholder: "搜索插件名、标题或描述",
+    total: (n: number): string => `${n} 个插件`,
+    shownOf: (shown: number, total: number): string => `${shown} / ${total}`,
+    empty: "索引源里没有插件。",
+    noMatch: "没有符合条件的插件。",
+    loadMore: (n: number): string => `再显示 ${n} 个`,
+    refresh: "刷新",
+    allCategories: "全部",
+    howTitle: "转换规则与使用流程",
+    needsSetup: "这些技能自带 Node 依赖，首次使用前要在技能目录里装一次：",
+    sourceNpm: "来源：npm 包",
+    sourceGit: (commit: string): string => `来源：git 仓库，commit ${commit}`,
+    howBody:
+      "安装时只搬运两端含义相同的内容：技能（skills）与 MCP 服务器。Cordis 宿主代码（apply(ctx)、cordis.patch.yml、前端注入）在这里没有对应物，会被丢弃并在报告里列出。装好后到「插件市场」把它装到某个 Agent 上；不要了在同一张卡片点「卸载」。",
+    otherCategory: "其他",
+    stillReading: "索引源还在读取（官方索引约 9.5 MB，首次要十几秒）。稍等一下，或点「刷新」。",
+    install: "转换并安装",
+    installing: "转换中…",
+    installHint: "装好后可在「插件市场」页把它装到 Agent 上。",
+    installed: (version: string): string => `已安装 v${version}`,
+    uninstall: "卸载",
+    uninstallConfirm: (name: string): string =>
+      `从这台服务器卸载 ${name}？已装到 Agent 上的技能不会自动移除。`,
+    uninstalled: (name: string): string => `${name} 已卸载。`,
+    reportTitle: "已转换并安装",
+    reportIntro: (name: string, version: string): string =>
+      `${name}@${version} 已转换成本服务器的插件包，出现在「插件市场」的库里。`,
+    reportSkills: (names: string[]): string => `技能 ${names.length} 个：${names.join("、")}`,
+    reportMcp: (names: string[]): string => `MCP 服务器：${names.join("、")}`,
+    reportDropped: (rows: { path: string; reason: string }[]): string =>
+      `丢弃 ${rows.length} 项：${rows.map((r) => `${r.path}（${r.reason}）`).join("；")}`,
+    reportWarnings: (rows: string[]): string => `注意：${rows.join("；")}`,
+    close: "关闭",
+    notAdaptable: (reason: string): string => `这个插件无法转换：${reason}`,
+    readFailed: (error: string): string => `读取插件市场失败：${error}`,
+    adminOnly: "只有管理员可以添加索引源或安装插件。",
   },
 };
 

@@ -20,6 +20,7 @@ export const en: Strings = {
     models: "Models",
     machines: "Machines",
     plugins: "Plugins",
+    "dsh-market": "DSH Plugin Market",
     usage: "Cost Center",
     traces: "Trajectories",
     benchmark: "Evaluation Center",
@@ -1385,8 +1386,10 @@ export const en: Strings = {
     version: (v: number) => `v${v}`,
     stageCount: (n: number) => `${n} stages`,
     instanceCount: (n: number) => `${n} instances`,
-    noDefinitions: "No workflow definitions yet. The bidding template seeds itself on first open; if still empty, check the server template files.",
-    noInstances: "No instances yet. Pick a definition and start the first instance for a tender project.",
+    noDefinitions:
+      "No workflow definitions yet. The bidding template seeds itself on first open; if still empty, check the server template files.",
+    noInstances:
+      "No instances yet. Pick a definition and start the first instance for a tender project.",
     attached: (n: number) => `${n} tickets attached`,
     stale: "Snapshot disagrees with the event stream (rebuilt from the stream for display)",
     advanced: "Advanced to the next stage",
@@ -5979,7 +5982,8 @@ Scenarios:
       setMachine: "Set machine",
       machineTitle: (name: string): string => `Change ${name}'s machine`,
       machineLabel: "Machine",
-      machineInfo: "Which machine this employee's sessions run on. Local only in single-machine builds.",
+      machineInfo:
+        "Which machine this employee's sessions run on. Local only in single-machine builds.",
       machineLocal: (alias: string): string => `This server (${alias}, default)`,
       machineRemoteNote: " (multi-machine builds only)",
       agentMissing: "Agent deleted",
@@ -6280,8 +6284,7 @@ Scenarios:
       bulkUnblockTitle: "Unblock in bulk",
       bulkUnblockConfirm: (n: number): string => `Unblock the following ${n} tickets?`,
       bulkUnblockMore: (n: number): string => `and ${n} more`,
-      bulkUnblockSkip: (n: number): string =>
-        `${n} not blocked, will be skipped`,
+      bulkUnblockSkip: (n: number): string => `${n} not blocked, will be skipped`,
       bulkUnblockNoteHint: "A note above is recorded as progress on each ticket",
       bulkUnblockDone: (ok: number, skipped: number): string =>
         skipped > 0 ? `${ok} unblocked, ${skipped} skipped (not blocked)` : `${ok} unblocked`,
@@ -6316,7 +6319,8 @@ Scenarios:
       /** The keyboard: two plain keys while the board is on screen, no modifier. */
       keyboardHint: "/ to search, N for a new ticket",
       bulkRejectHint: "Moving into Rejected needs a note, used as the reason",
-      selectHint: "Selected cards move, get assigned, take a note or unblock together; press again to leave",
+      selectHint:
+        "Selected cards move, get assigned, take a note or unblock together; press again to leave",
       summary: "Details",
       history: "History",
       historyEmpty: "No history yet",
@@ -6722,5 +6726,64 @@ Scenarios:
       shell_unreachable: "The desktop app could not be reached.",
       timeout: "That took too long. Try again.",
     },
+  },
+
+  dshMarket: {
+    pageTitle: "DSH plugin market",
+    pageDesc:
+      "Plugin indexes published for DeepSeek Harness (dsh). A dsh plugin runs inside the dsh host, so it cannot be installed here as it is: an install carries only the parts this server has an equivalent for — skills and MCP servers — and names everything it had to leave behind.",
+    sources: "Index sources",
+    sourcesEmpty:
+      "No index source yet. Add a dsh plugin index (a format-1 JSON file) and the plugins it lists appear below.",
+    sourceUrlPlaceholder:
+      "Index URL, e.g. https://cdn.jsdelivr.net/npm/dsh-plugin-catalog/index.json",
+    add: "Add index source",
+    adding: "Adding…",
+    remove: "Remove",
+    removeConfirm: (url: string): string =>
+      `Remove the index source ${url}? Its entries leave this list; plugins already installed stay installed.`,
+    cancel: "Cancel",
+    pluginsCount: (n: number): string => `${n} plugins`,
+    sourceReading: "Reading…",
+    sourceFailed: (error: string): string => `Could not read it: ${error}`,
+    searchPlaceholder: "Search names, titles and descriptions",
+    total: (n: number): string => `${n} plugins`,
+    shownOf: (shown: number, total: number): string => `${shown} / ${total}`,
+    empty: "The index sources list no plugins.",
+    noMatch: "No plugin matches that.",
+    loadMore: (n: number): string => `Show ${n} more`,
+    refresh: "Refresh",
+    allCategories: "All",
+    howTitle: "How conversion works",
+    needsSetup:
+      "These skills ship their own Node dependencies: install them once before first use:",
+    sourceNpm: "Source: npm package",
+    sourceGit: (commit: string): string => `Source: git repository at commit ${commit}`,
+    howBody:
+      "An install carries only what means the same on both sides: skills and MCP servers. Cordis host code (apply(ctx), cordis.patch.yml, client injection) has no equivalent here and is dropped, named in the report. Once installed, add it to an Agent from the Plugins page; Remove on the card deletes it from this server.",
+    otherCategory: "Other",
+    stillReading:
+      "A source is still being read (the official index is ~9.5 MB and takes a while the first time). Wait a moment, or press Refresh.",
+    install: "Convert and install",
+    installing: "Converting…",
+    installHint:
+      "Once installed it shows in the Plugins page, where it can be installed on an Agent.",
+    installed: (version: string): string => `Installed v${version}`,
+    uninstall: "Remove",
+    uninstallConfirm: (name: string): string =>
+      `Remove ${name} from this server? Skills already installed on an Agent stay there.`,
+    uninstalled: (name: string): string => `${name} removed.`,
+    reportTitle: "Converted and installed",
+    reportIntro: (name: string, version: string): string =>
+      `${name}@${version} is now a plugin package on this server, listed in the Plugins library.`,
+    reportSkills: (names: string[]): string => `Skills (${names.length}): ${names.join(", ")}`,
+    reportMcp: (names: string[]): string => `MCP servers: ${names.join(", ")}`,
+    reportDropped: (rows: { path: string; reason: string }[]): string =>
+      `Left behind (${rows.length}): ${rows.map((r) => `${r.path} (${r.reason})`).join("; ")}`,
+    reportWarnings: (rows: string[]): string => `Note: ${rows.join("; ")}`,
+    close: "Close",
+    notAdaptable: (reason: string): string => `This plugin cannot be converted: ${reason}`,
+    readFailed: (error: string): string => `Could not read the market: ${error}`,
+    adminOnly: "Only an admin can add index sources or install plugins.",
   },
 };

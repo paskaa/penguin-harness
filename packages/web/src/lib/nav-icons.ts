@@ -15,6 +15,8 @@ export const NAV_ICONS = {
   archived: ICONS.archive,
   /** Plugin library (the puzzle piece). */
   plugins: ICONS.puzzle,
+  /** The dsh plugin market: plugins brought in from outside (an arrow down onto a tray). */
+  "dsh-market": ICONS.download,
   /** Model library (a chip). */
   models: ICONS.chip,
   /** Machines (two stacked server units). */
