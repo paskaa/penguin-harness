@@ -5409,6 +5409,137 @@ export interface PluginReadmeResponse {
 }
 
 // ---------------------------------------------------------------------------
+// DeepSeek Harness plugin market
+// ---------------------------------------------------------------------------
+
+/** Text a dsh index may give in several languages: a string (English) or `{ en, zh, … }`. */
+export type DshText = string | Record<string, string>;
+
+/** Where one listed dsh version installs from. */
+export type DshVersionSource =
+  | { type: "npm"; registry?: string }
+  | { type: "git"; url?: string; commit?: string; path?: string };
+
+/**
+ * One plugin of one dsh index, as the market page lists it. A dsh plugin is a Cordis plugin that
+ * runs inside the dsh host, which this server does not have: what a card installs is the part of
+ * the package that has a PenguinHarness equivalent (skills and MCP servers), built by the
+ * adapter and installed as a plugin package.
+ */
+export interface DshEntryItem {
+  /** The npm package name the index lists. */
+  name: string;
+  /** The version a card offers: the highest listed release, else the highest prerelease. */
+  version: string;
+  /** Every listed version, newest first. */
+  versions: string[];
+  title: DshText;
+  description?: DshText;
+  author?: string;
+  homepage?: string;
+  repository?: string;
+  category?: string;
+  /** The category's display title, from the index's own declarations. */
+  categoryTitle?: DshText;
+  keywords: string[];
+  /** The `engines.dsh` range the index declares for that version, for display only. */
+  enginesDsh?: string;
+  /** Unix timestamp (seconds) the listed version was published. */
+  publishTimestamp?: number;
+  source: DshVersionSource;
+  /** The source (`GET …/sources` row) this entry came from. */
+  sourceId: string;
+  sourceUrl: string;
+  /** The version this server holds of the ported package, when it is installed. */
+  installedVersion?: string;
+}
+
+/** One index source an operator added, with what reading it gave. */
+export interface DshSourceItem {
+  id: string;
+  url: string;
+  /** The index's own title; "" until it has been read at least once. */
+  title: string;
+  /** Plugins it lists; 0 when it could not be read. */
+  plugins: number;
+  /** Why it could not be read (present beside the last good entries when a refresh failed). */
+  error?: string;
+  /** It had not answered when this listing was built; open the page again for its entries. */
+  pending?: boolean;
+}
+
+/**
+ * GET /api/plugins/dsh-market (and the answer to adding or removing a source): every source and
+ * every entry. The listing is the whole set — 5437 entries for the community index — because the
+ * page filters it locally, as the Plugins page does with its own registry.
+ */
+export interface DshMarketResponse {
+  sources: DshSourceItem[];
+  /** The entries this answer carries: one page, narrowed by `q` when one was given. */
+  entries: DshEntryItem[];
+  /** How many entries match (the whole market when `q` is absent), for the "x / y" line. */
+  total: number;
+  /**
+   * The market's categories with how many entries each holds, for the chips row. Counts are over
+   * what `q` matched (so they follow a search); the category filter narrows `entries` only.
+   * An entry with no category is the `""` bucket, titled "Other" by the page.
+   */
+  categories: { id: string; title?: DshText; count: number }[];
+}
+
+export interface DshMarketSourceRequest {
+  url: string;
+}
+
+export interface DshMarketInstallRequest {
+  name: string;
+  /** The listed version to install; the entry's offered version when absent. */
+  version?: string;
+}
+
+/**
+ * POST /api/plugins/dsh-market/install answers one of these (202): the install runs in the
+ * background, because fetching a tarball and running `npm install` outlives a request. GET
+ * …/install/:id is the same object, polled until `state` is "done" or "failed".
+ */
+export interface DshMarketInstallJob {
+  id: string;
+  /** The dsh package the job converts. */
+  name: string;
+  version: string;
+  state: "running" | "done" | "failed";
+  /** Unix milliseconds. */
+  startedAt: number;
+  /** The report, once `state` is "done". */
+  result?: DshMarketInstallResponse;
+  /** Why it failed, once `state` is "failed" (`dsh_not_adaptable` is the one to expect). */
+  error?: { code: string; message: string };
+}
+
+export interface DshMarketUninstallRequest {
+  /** The ported package name (`@dsh-ported/<name>`), as an entry reports it. */
+  name: string;
+}
+
+/** What the adaptation carried, and what it had to leave behind. */
+export interface DshMarketInstallResponse {
+  /** The package name installed (`@dsh-ported/<name>`), shown in the Plugins library. */
+  name: string;
+  version: string;
+  title: string;
+  skills: { name: string; from: string; files: number; needsSetup?: boolean }[];
+  mcpServers: string[];
+  /** MCP servers whose own files travelled with them (a stdio server's script and helpers). */
+  mcpCarried: { server: string; files: number }[];
+  /** Runtime dependencies the ported package declares (installed by npm with the package). */
+  dependencies: string[];
+  /** Where the version came from: an npm package, or a repository pinned to a commit. */
+  source: { kind: "npm" | "git"; commit?: string; path?: string };
+  dropped: { path: string; reason: string }[];
+  warnings: string[];
+}
+
+// ---------------------------------------------------------------------------
 // Plugin-contributed languages
 // ---------------------------------------------------------------------------
 

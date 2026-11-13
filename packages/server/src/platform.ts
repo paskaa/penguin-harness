@@ -144,6 +144,7 @@ import { HmrRoutes } from "./hmr/routes.js";
 import { EventsRoutes } from "./http/routes/events.js";
 import { PluginRegistryRoutes, PluginRoutes } from "./http/routes/plugins.js";
 import { InstalledPluginRoutes } from "./http/routes/plugins-installed.js";
+import { DshMarketRoutes } from "./http/routes/dsh-market.js";
 import { NpmPluginPackages } from "./plugin/install.js";
 import { SuggestIdRoutes } from "./http/routes/suggest-id.js";
 import { LanguageRoutes } from "./http/routes/languages.js";
@@ -517,6 +518,7 @@ export class CompanyModule {}
     DesktopPrivacySettingsRoutes,
     PluginRoutes,
     PluginRegistryRoutes,
+    DshMarketRoutes,
     NpmPluginPackages,
     InstalledPluginRoutes,
     SuggestIdRoutes,
