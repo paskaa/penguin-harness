@@ -8236,3 +8236,29 @@ export type {
   WorkflowStageGate,
   WorkflowStepState,
 } from "./workflow-types.js";
+
+// ---------------------------------------------------------------------------
+// DSH console
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /api/dsh/console: the DeepSeek Harness Web UI this server runs for the console page.
+ *
+ * A dsh plugin that contributes UI does it through client slots, which only dsh's own Web client
+ * can render; the console starts `dsh web` and embeds it, so those plugins work as their authors
+ * wrote them.
+ */
+export interface DshConsoleStatus {
+  state: "stopped" | "starting" | "running" | "failed";
+  /** The URL the panel embeds, when running. */
+  url?: string;
+  port?: number;
+  /** Unix milliseconds. */
+  startedAt?: number;
+  /** Why it could not start, or stopped being reachable. */
+  error?: string;
+  /** False when no `dsh` binary answers `--version`. */
+  installed: boolean;
+  /** What `dsh --version` printed, when installed. */
+  version?: string;
+}
