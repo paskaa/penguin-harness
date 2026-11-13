@@ -248,8 +248,80 @@ class PenguinServer {
    * with them. The terminal stream is a WebSocket upgrade, which never reaches the fetch
    * handler — it is bound on each Node listener here, once the platform it asks exists.
    */
+  /**
+   * PATCH(jchl254 2026-11-02, D1): walk every agent's Trace index once, in the background.
+   *
+   * The first read of any Session calls `traceIndex.reconcileAgent`, which stats and walks that
+   * agent's whole `traces/` tree — tens of thousands of `stat()` calls on a large agent. It is paid
+   * once per agent per process, and whoever opens the first conversation after a restart is the one
+   * who pays it.
+   *
+   * Running it here — a few seconds after the port opens, off the request path, and unref'd so it
+   * can never hold the process up — moves that cost to a moment nobody is waiting for. Failures are
+   * logged and ignored: a cold index is exactly the state the read path already handles.
+   */
+  warmTraceIndex(): void {
+    const run = async (): Promise<void> => {
+      const started = Date.now();
+      let index: { root?: unknown; reconcileProject?: unknown };
+      try {
+        index = this.deps.tree.api<{ root?: unknown; reconcileProject?: unknown }>(
+          "TracesModule",
+          "TraceIndex",
+        );
+      } catch (e) {
+        console.error(`[warm] TraceIndex unavailable: ${(e as Error)?.message ?? e}`);
+        return;
+      }
+      if (typeof index.reconcileProject !== "function") {
+        console.error("[warm] TraceIndex has no reconcileProject");
+        return;
+      }
+      const root = index.root;
+      if (typeof root !== "string" || root.length === 0) {
+        console.error("[warm] TraceIndex has no root");
+        return;
+      }
+      const reconcile = index.reconcileProject.bind(index) as (id: string) => Promise<void>;
+      let projects: string[] = [];
+      try {
+        const entries = await fs.promises.readdir(root, { withFileTypes: true });
+        projects = entries.filter((e) => e.isDirectory() && !e.name.startsWith(".")).map((e) => e.name);
+      } catch (e) {
+        console.error(`[warm] cannot read data root ${root}: ${(e as Error)?.message ?? e}`);
+        return;
+      }
+      let done = 0;
+      let failed = 0;
+      for (const projectId of projects) {
+        try {
+          const stat = await fs.promises.stat(path.join(root, projectId, "agents"));
+          if (!stat.isDirectory()) continue;
+        } catch {
+          continue;
+        }
+        try {
+          await reconcile(projectId);
+          done += 1;
+        } catch (e) {
+          failed += 1;
+          console.error(`[warm] reconcile ${projectId} failed: ${(e as Error)?.message ?? e}`);
+        }
+      }
+      console.error(
+        `[warm] trace index warmed: ${done} project(s), ${failed} failed, ${Date.now() - started}ms`,
+      );
+    };
+    const timer = setTimeout(() => {
+      void run().catch((e) => console.error(`[warm] aborted: ${(e as Error)?.message ?? e}`));
+    }, 5000);
+    timer.unref?.();
+  }
+
   buildApp(): void {
     this.app = createApp(this.deps);
+    // PATCH(jchl254 2026-11-02, D1): see warmTraceIndex above.
+    this.warmTraceIndex();
     attachTerminalWebSocket(this.httpServer as unknown as HttpServer, this.terminalWebSocketDeps());
     attachExtensionWebSocket(
       this.httpServer as unknown as HttpServer,
